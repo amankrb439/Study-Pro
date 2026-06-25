@@ -1,0 +1,8 @@
+{
+  "name": "Remix: Remix: Remix: Remix: Remix: Remix: Remix: Remix: Remix: ExamShip Elite",
+  "description": "Source-grounded competitive exam preparation platform with Gamification",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

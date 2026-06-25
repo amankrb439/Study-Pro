@@ -1,0 +1,76 @@
+{
+  "entities": {
+    "Subject": {
+      "title": "Subject",
+      "description": "A subject area",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "icon": { "type": "string" },
+        "color": { "type": "string" },
+        "documents": { "type": "array" }
+      }
+    },
+    "Question": {
+      "title": "Question",
+      "description": "A quiz question",
+      "type": "object",
+      "properties": {
+        "chapterId": { "type": "string" },
+        "question": { "type": "string" },
+        "options": { "type": "array" },
+        "correctAnswer": { "type": "string" },
+        "explanation": { "type": "string" },
+        "topicTag": { "type": "string" },
+        "difficulty": { "type": "string" },
+        "sourceReference": { "type": "string" }
+      }
+    },
+    "QuizSet": {
+      "title": "Quiz Set",
+      "description": "A saved quiz set",
+      "type": "object",
+      "properties": {
+        "chapterId": { "type": "string" },
+        "title": { "type": "string" },
+        "topics": { "type": "array" }
+      }
+    },
+    "GlobalState": {
+      "title": "Global State",
+      "description": "Global user state",
+      "type": "object",
+      "properties": {
+        "level": { "type": "string" },
+        "xp": { "type": "number" },
+        "streak": { "type": "number" },
+        "totalCorrect": { "type": "number" },
+        "totalWrong": { "type": "number" },
+        "lastActive": { "type": "number" },
+        "attempts": { "type": "array" }
+      }
+    }
+  },
+  "firestore": {
+    "/subjects/{subjectId}": {
+      "schema": "Subject",
+      "description": "Global subjects"
+    },
+    "/questions/{questionId}": {
+      "schema": "Question",
+      "description": "Global questions"
+    },
+    "/quiz_sets/{setId}": {
+      "schema": "QuizSet",
+      "description": "Global quiz sets"
+    },
+    "/global_stats/public_stats": {
+      "schema": "GlobalState",
+      "description": "Global user stats (shared)"
+    },
+    "/appData/{docId}": {
+      "description": "App data storage"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Explicit rule for the appData collection used for dynamic backups
+    match /appData/{docId} {
+      allow read, write: if true;
+    }
+
+    // Explicit rules for subjects collection
+    match /subjects/{subjectId} {
+      allow read, write: if true;
+    }
+
+    // Explicit rules for questions collection
+    match /questions/{questionId} {
+      allow read, write: if true;
+    }
+
+    // Explicit rules for quiz sets collection
+    match /quiz_sets/{setId} {
+      allow read, write: if true;
+    }
+
+    // Explicit rules for global stats collection
+    match /global_stats/{docId} {
+      allow read, write: if true;
+    }
+
+    // Default catch-all safety net: block all other unexpected access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

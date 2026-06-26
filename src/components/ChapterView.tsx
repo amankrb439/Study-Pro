@@ -208,7 +208,7 @@ export function ChapterView() {
       }
 
       if (data.isQuotaFallback) {
-        setQuotaNotice(data.message);
+        setQuotaNotice(data.quotaNotice || data.message);
       }
 
       const generatedQs = data.questions.map((q: any) => ({

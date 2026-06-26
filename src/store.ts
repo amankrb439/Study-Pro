@@ -485,7 +485,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       if (data.isQuotaFallback) {
-        set({ uploadQuotaNotice: data.message });
+        set({ uploadQuotaNotice: data.quotaNotice || data.message });
       }
       
       const newDoc = {

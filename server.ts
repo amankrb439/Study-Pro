@@ -32,7 +32,7 @@ function getGenAI(req: express.Request): GoogleGenAI {
 // Resilient helper to handle high-demand 503 errors and load spikes gracefully
 async function generateContentWithRetryAndFallback(params: any, ai: GoogleGenAI): Promise<any> {
   const preferredModel = params.model;
-  const fallbackModels = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"];
+  const fallbackModels = ["gemini-3.5-flash", "gemini-3.1-pro-preview"];
   const modelsToTry = preferredModel && !fallbackModels.includes(preferredModel)
     ? [preferredModel, ...fallbackModels]
     : fallbackModels;
@@ -578,11 +578,6 @@ app.post("/api/analyze-pdf-chunked", express.json({ limit: "100mb" }), async (re
   try {
     const { fileId, totalChunks, originalname, mimetype } = req.body;
     
-    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY.trim() === "") {
-      throw new Error("Quota exceeded: GEMINI_API_KEY is not defined. Falling back.");
-    }
-    const ai = getGenAI(req);
-
     initServerDb();
     const cleanName = originalname.replace(/[^a-zA-Z0-9\.\-_]/g, "_");
     const permanentFilename = `${fileId}_${cleanName}`;
@@ -596,6 +591,23 @@ app.post("/api/analyze-pdf-chunked", express.json({ limit: "100mb" }), async (re
     }
     
     console.log(`[File System] Assembled persistent source file to: ${permanentPath}`);
+    
+    let ai;
+    try {
+      ai = getGenAI(req);
+    } catch(err) {
+      console.log("[Gemini API] Activating graceful quota fallback PDF analysis due to missing API key...");
+      return res.json({
+         fileUri: "fallback_uri",
+         mimeType: mimetype,
+         originalName: originalname,
+         localPath: path.basename(permanentPath),
+         analysis: generateDynamicFallbackAnalysis(originalname),
+         isQuotaFallback: true,
+         quotaNotice: getQuotaFallbackNotice("Flash-based PDF upload logic")
+      });
+    }
+
     await analyzeAndReturnPDF(permanentPath, originalname, mimetype, ai, res);
   } catch (err: any) {
     res.status(500).json({ error: err.message || "Failed to assemble and analyze chunks" });
@@ -613,13 +625,8 @@ app.post("/api/analyze-pdf", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "The uploaded file is too small to be a valid PDF document. Please upload a real PDF." });
     }
 
-    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY.trim() === "") {
-      throw new Error("Quota exceeded: GEMINI_API_KEY is not defined. Falling back.");
-    }
-
     const { targetExams } = req.body;
-    const ai = getGenAI(req);
-
+    
     // Save file permanently on the server's disk
     initServerDb();
     const fileId = Date.now() + "_" + Math.random().toString(36).substr(2, 9);
@@ -628,6 +635,22 @@ app.post("/api/analyze-pdf", upload.single("file"), async (req, res) => {
     const permanentPath = path.join(UPLOADS_DIR, permanentFilename);
     fs.copyFileSync(req.file.path, permanentPath);
     console.log(`[File System] Saved persistent source file to: ${permanentPath}`);
+
+    let ai;
+    try {
+      ai = getGenAI(req);
+    } catch(err) {
+      console.log("[Gemini API] Activating graceful quota fallback PDF analysis due to missing API key...");
+      return res.json({
+         fileUri: "fallback_uri",
+         mimeType: req.file.mimetype,
+         originalName: req.file.originalname,
+         localPath: path.basename(permanentPath),
+         analysis: generateDynamicFallbackAnalysis(req.file.originalname),
+         isQuotaFallback: true,
+         quotaNotice: getQuotaFallbackNotice("Flash-based PDF upload logic")
+      });
+    }
 
     await analyzeAndReturnPDF(permanentPath, req.file.originalname, req.file.mimetype, ai, res);
   } catch (error: any) {
@@ -907,6 +930,12 @@ app.post("/api/generate-questions", async (req, res) => {
 
     if (isQuota) {
       console.log("[Gemini API] Activating graceful quota fallback question generation...");
+      const fallbackQuestions = generateDynamicFallbackQuestions(req.body.topicInfo || "General Topic", req.body.count || 5);
+      return res.json({ 
+        questions: fallbackQuestions,
+        isQuotaFallback: true,
+        quotaNotice: getQuotaFallbackNotice("question generation")
+      });
     }
 
     console.error("Generation Error:", error);
@@ -1144,6 +1173,53 @@ app.use("/api/*", (req, res) => {
 });
 
 export default app;
+
+function getQuotaFallbackNotice(context: string) {
+  return `Gemini API quota exceeded during ${context}. Using local simulated fallback data to keep you moving forward! To use live generation, add your API key in settings.`;
+}
+
+function generateDynamicFallbackAnalysis(fileName: string) {
+  return {
+    subjectFocus: "Simulated Physics/Science (Fallback Data)",
+    totalEstimatedQuestions: 150,
+    chapters: [
+      {
+        title: "1. गति और बल (Motion & Force)",
+        description: "न्यूटन के नियम और गति के प्रकार का अध्ययन। (Study of Newton's laws and types of motion.)",
+        topics: ["गति के प्रकार", "न्यूटन के नियम", "घर्षण"],
+        importantConcepts: ["जड़त्व (Inertia)", "संवेग (Momentum)"],
+        estimatedQuestions: 30
+      },
+      {
+        title: "2. गुरुत्वाकर्षण (Gravitation)",
+        description: "गुरुत्वाकर्षण बल और उसके प्रभावों का विश्लेषण।",
+        topics: ["केप्लर के नियम", "सार्वत्रिक गुरुत्वाकर्षण नियम"],
+        importantConcepts: ["G का मान", "पलायन वेग"],
+        estimatedQuestions: 25
+      },
+      {
+        title: "3. कार्य, ऊर्जा और शक्ति (Work, Energy & Power)",
+        description: "कार्य और ऊर्जा के बीच संबंध।",
+        topics: ["गतिज ऊर्जा", "स्थितिज ऊर्जा", "शक्ति की परिभाषा"],
+        importantConcepts: ["ऊर्जा संरक्षण का नियम"],
+        estimatedQuestions: 40
+      }
+    ]
+  };
+}
+
+function generateDynamicFallbackQuestions(topicInfo: string, count: number) {
+  const qList = [];
+  for (let i = 0; i < count; i++) {
+    qList.push({
+      question: `(Fallback Q${i+1}) यह एक जनरेटेड प्रश्न है जो ${topicInfo.substring(0, 20)} के बारे में है। सही उत्तर क्या है?`,
+      options: ["सही विकल्प 1", "गलत विकल्प 2", "गलत विकल्प 3", "गलत विकल्प 4"],
+      correctAnswer: "सही विकल्प 1",
+      explanation: `यह एक सिम्युलेटेड स्पष्टीकरण है। (Fallback API Rate Limit exceeded)`
+    });
+  }
+  return qList;
+}
 
 async function startServer() {
   const PORT = 3000;

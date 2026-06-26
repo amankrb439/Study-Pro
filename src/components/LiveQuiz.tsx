@@ -150,9 +150,10 @@ interface LiveQuizProps {
   questions: Question[];
   onComplete: () => void;
   onHome?: () => void;
+  onNextTest?: () => void;
 }
 
-export function LiveQuiz({ quizSet, questions, onComplete, onHome }: LiveQuizProps) {
+export function LiveQuiz({ quizSet, questions, onComplete, onHome, onNextTest }: LiveQuizProps) {
   const { updateStats, settings, userStats, updateSettings } = useAppStore();
   const themeId = settings?.themeId || "midnight-obsidian";
   const gradients = getThemeGradients(themeId);
@@ -723,13 +724,19 @@ export function LiveQuiz({ quizSet, questions, onComplete, onHome }: LiveQuizPro
             </button>
             <button
               id="result-retry-btn"
-              onClick={handleRestartQuiz}
+              onClick={() => {
+                if (onNextTest) {
+                  onNextTest();
+                } else {
+                  handleRestartQuiz();
+                }
+              }}
               className={cn(
                 "text-white font-black tracking-wider uppercase text-xs rounded-2.5xl py-4.5 flex items-center justify-center gap-2 flex-grow shadow-xl active:scale-95 transition-all cursor-pointer border",
                 gradients.primary
               )}
             >
-              <span>🔄 New Test</span>
+              <span>{onNextTest ? "⏭️ Next Test" : "🔄 Retry Test"}</span>
             </button>
           </div>
 

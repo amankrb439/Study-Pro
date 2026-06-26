@@ -137,6 +137,16 @@ export function ChapterView() {
     try {
       const qs = await getQuestions(activeChapter.id);
       const sets = await getQuizSets(activeChapter.id);
+      
+      sets.sort((a, b) => {
+        const matchA = a.name.match(/Set\s+(\d+)/i);
+        const matchB = b.name.match(/Set\s+(\d+)/i);
+        if (matchA && matchB) {
+            return parseInt(matchA[1], 10) - parseInt(matchB[1], 10);
+        }
+        return a.createdAt - b.createdAt;
+      });
+
       setQuestions(qs);
       setQuizSets(sets);
     } catch (err) {
@@ -256,6 +266,10 @@ export function ChapterView() {
     const quizQuestions = questions.filter((q) =>
       activeQuiz.questionIds.includes(q.id),
     );
+    
+    const currentQuizIndex = quizSets.findIndex(q => q.id === activeQuiz.id);
+    const nextQuiz = currentQuizIndex !== -1 && currentQuizIndex < quizSets.length - 1 ? quizSets[currentQuizIndex + 1] : undefined;
+
     return (
       <LiveQuiz
         quizSet={activeQuiz}
@@ -274,6 +288,7 @@ export function ChapterView() {
           setActiveQuiz(null);
           window.history.pushState({ depth: 0 }, "");
         }}
+        onNextTest={nextQuiz ? () => setActiveQuiz(nextQuiz) : undefined}
       />
     );
   }

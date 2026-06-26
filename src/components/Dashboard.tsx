@@ -51,16 +51,7 @@ export function Dashboard() {
     }
     
     // Start background upload via the store
-    uploadDocument(file, targetSubjectId).then(() => {
-        // Find subject to auto-select if needed after completion
-        // If user hasn't navigated away, maybe auto-select?
-        // Let's just rely on global state to show the doc.
-        // Or if they are still on the dashboard:
-        // const finalSub = useAppStore.getState().subjects.find(s => s.id === targetSubjectId);
-        // if (finalSub && !useAppStore.getState().activeSubject) {
-        //   setActiveSubject(finalSub);
-        // }
-    });
+    uploadDocument(file, targetSubjectId).catch((err) => console.error(err));
     
     // Clear input so same file can be selected again
     if (fileInputRef.current) fileInputRef.current.value = '';

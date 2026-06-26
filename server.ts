@@ -309,11 +309,12 @@ function robustJsonParse(str: string): any {
 
 
 export const app = express();
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+app.use(express.json({ limit: "100mb" }));
+app.use(express.urlencoded({ extended: true, limit: "100mb" }));
 
 let DATA_DIR = path.join(process.cwd(), "data");
 let UPLOADS_DIR = path.join(process.cwd(), "uploads");
+let CHUNKS_DIR = path.join(process.cwd(), "chunks");
 let DB_FILE = path.join(process.cwd(), "src", "data", "db.json");
 
 function initServerDb() {
@@ -323,6 +324,9 @@ function initServerDb() {
     }
     if (!fs.existsSync(UPLOADS_DIR)) {
       fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(CHUNKS_DIR)) {
+      fs.mkdirSync(CHUNKS_DIR, { recursive: true });
     }
     if (!fs.existsSync(path.dirname(DB_FILE))) {
       fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
@@ -336,6 +340,7 @@ function initServerDb() {
     const tempDir = os.tmpdir();
     DATA_DIR = path.join(tempDir, "data");
     UPLOADS_DIR = path.join(tempDir, "uploads");
+    CHUNKS_DIR = path.join(tempDir, "chunks");
     DB_FILE = path.join(tempDir, "db.json");
 
     try {
@@ -344,6 +349,9 @@ function initServerDb() {
       }
       if (!fs.existsSync(UPLOADS_DIR)) {
         fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+      }
+      if (!fs.existsSync(CHUNKS_DIR)) {
+        fs.mkdirSync(CHUNKS_DIR, { recursive: true });
       }
       if (!fs.existsSync(DB_FILE)) {
         fs.writeFileSync(DB_FILE, JSON.stringify({}), "utf-8");
@@ -370,7 +378,7 @@ app.get("/api/db", (req, res) => {
   }
 });
 
-app.post("/api/db", express.json({ limit: "50mb" }), (req, res) => {
+app.post("/api/db", express.json({ limit: "100mb" }), (req, res) => {
   try {
     const { key, value } = req.body;
     let db: any = {};
@@ -447,36 +455,27 @@ app.post("/api/verify-key", async (req, res) => {
   }
 });
 
-// 1. Upload and Analyze PDF for Chapters
-app.post("/api/analyze-pdf", upload.single("file"), async (req, res) => {
+app.post("/api/upload-chunk", upload.single("chunk"), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
-    }
-
-    if (req.file.size < 1024) {
-      return res.status(400).json({ error: "The uploaded file is too small to be a valid PDF document. Please upload a real PDF." });
-    }
-
-    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY.trim() === "") {
-      throw new Error("Quota exceeded: GEMINI_API_KEY is not defined. Falling back.");
-    }
-
-    const { targetExams } = req.body;
-    const ai = getGenAI(req);
-
-    // Save file permanently on the server's disk
+    const { fileId, chunkIndex } = req.body;
+    if (!req.file) return res.status(400).json({ error: "No chunk uploaded" });
+    
     initServerDb();
-    const fileId = Date.now() + "_" + Math.random().toString(36).substr(2, 9);
-    const cleanName = req.file.originalname.replace(/[^a-zA-Z0-9\.\-_]/g, "_");
-    const permanentFilename = `${fileId}_${cleanName}`;
-    const permanentPath = path.join(UPLOADS_DIR, permanentFilename);
-    fs.copyFileSync(req.file.path, permanentPath);
-    console.log(`[File System] Saved persistent source file to: ${permanentPath}`);
+    const chunkDest = path.join(CHUNKS_DIR, `${fileId}_chunk_${chunkIndex}`);
+    fs.copyFileSync(req.file.path, chunkDest);
+    fs.unlinkSync(req.file.path);
+    
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Chunk upload failed" });
+  }
+});
 
+async function analyzeAndReturnPDF(permanentPath: string, originalName: string, mimeType: string, ai: any, res: express.Response) {
+  try {
     const uploadedFile = await ai.files.upload({
       file: permanentPath,
-      config: { mimeType: req.file.mimetype },
+      config: { mimeType: mimeType },
     });
 
     const response = await generateContentWithRetryAndFallback({
@@ -540,8 +539,8 @@ app.post("/api/analyze-pdf", upload.single("file"), async (req, res) => {
     res.json({
        fileUri: uploadedFile.uri,
        mimeType: uploadedFile.mimeType,
-       originalName: req.file.originalname,
-       localPath: permanentFilename,
+       originalName: originalName,
+       localPath: path.basename(permanentPath),
        analysis
      });
 
@@ -558,9 +557,81 @@ app.post("/api/analyze-pdf", upload.single("file"), async (req, res) => {
 
     if (isQuota) {
       console.log("[Gemini API] Activating graceful quota fallback PDF analysis...");
+      res.json({
+         fileUri: "fallback_uri",
+         mimeType: mimeType,
+         originalName: originalName,
+         localPath: path.basename(permanentPath),
+         analysis: generateDynamicFallbackAnalysis(originalName),
+         isQuotaFallback: true,
+         quotaNotice: getQuotaFallbackNotice("Flash-based PDF upload logic")
+      });
+    } else {
+      console.error("Analysis Error:", error);
+      const friendlyError = formatGeminiError(error);
+      res.status(500).json({ error: friendlyError });
+    }
+  }
+}
+
+app.post("/api/analyze-pdf-chunked", express.json({ limit: "100mb" }), async (req, res) => {
+  try {
+    const { fileId, totalChunks, originalname, mimetype } = req.body;
+    
+    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY.trim() === "") {
+      throw new Error("Quota exceeded: GEMINI_API_KEY is not defined. Falling back.");
+    }
+    const ai = getGenAI(req);
+
+    initServerDb();
+    const cleanName = originalname.replace(/[^a-zA-Z0-9\.\-_]/g, "_");
+    const permanentFilename = `${fileId}_${cleanName}`;
+    const permanentPath = path.join(UPLOADS_DIR, permanentFilename);
+
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkPath = path.join(CHUNKS_DIR, `${fileId}_chunk_${i}`);
+      const chunkData = fs.readFileSync(chunkPath);
+      fs.appendFileSync(permanentPath, chunkData);
+      fs.unlinkSync(chunkPath);
+    }
+    
+    console.log(`[File System] Assembled persistent source file to: ${permanentPath}`);
+    await analyzeAndReturnPDF(permanentPath, originalname, mimetype, ai, res);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || "Failed to assemble and analyze chunks" });
+  }
+});
+
+// 1. Upload and Analyze PDF for Chapters
+app.post("/api/analyze-pdf", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
     }
 
-    console.error("Analysis Error:", error);
+    if (req.file.size < 1024) {
+      return res.status(400).json({ error: "The uploaded file is too small to be a valid PDF document. Please upload a real PDF." });
+    }
+
+    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY.trim() === "") {
+      throw new Error("Quota exceeded: GEMINI_API_KEY is not defined. Falling back.");
+    }
+
+    const { targetExams } = req.body;
+    const ai = getGenAI(req);
+
+    // Save file permanently on the server's disk
+    initServerDb();
+    const fileId = Date.now() + "_" + Math.random().toString(36).substr(2, 9);
+    const cleanName = req.file.originalname.replace(/[^a-zA-Z0-9\.\-_]/g, "_");
+    const permanentFilename = `${fileId}_${cleanName}`;
+    const permanentPath = path.join(UPLOADS_DIR, permanentFilename);
+    fs.copyFileSync(req.file.path, permanentPath);
+    console.log(`[File System] Saved persistent source file to: ${permanentPath}`);
+
+    await analyzeAndReturnPDF(permanentPath, req.file.originalname, req.file.mimetype, ai, res);
+  } catch (error: any) {
+    const msg = error?.message || String(error);
     const friendlyError = formatGeminiError(error);
     res.status(500).json({ error: friendlyError });
   } finally {

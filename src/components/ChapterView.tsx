@@ -272,6 +272,7 @@ export function ChapterView() {
 
     return (
       <LiveQuiz
+        key={activeQuiz.id}
         quizSet={activeQuiz}
         questions={quizQuestions}
         onComplete={() => {

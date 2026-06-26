@@ -397,9 +397,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       set({ isUploading: true, uploadError: "", uploadQuotaNotice: "" });
       
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("targetExams", "HSSC CET Group C, Group D, HSSC Constable, NCERT");
+      if (file.size > 100 * 1024 * 1024) {
+        throw new Error("File is too large. Please upload a PDF smaller than 100MB.");
+      }
 
       const headers: Record<string, string> = {};
       const apiKey = get().apiKey;
@@ -407,11 +407,62 @@ export const useAppStore = create<AppState>((set, get) => ({
         headers['x-gemini-api-key'] = apiKey;
       }
 
-      const response = await fetch("/api/analyze-pdf", {
-        method: "POST",
-        headers,
-        body: formData,
-      });
+      let response;
+      const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB
+      
+      if (file.size > CHUNK_SIZE) {
+        // Chunked upload
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        const fileId = Date.now() + "_" + Math.random().toString(36).substr(2, 9);
+        
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, file.size);
+          const chunk = file.slice(start, end);
+          
+          const chunkFormData = new FormData();
+          chunkFormData.append("chunk", chunk, file.name);
+          chunkFormData.append("fileId", fileId);
+          chunkFormData.append("chunkIndex", i.toString());
+          
+          const chunkResponse = await fetch("/api/upload-chunk", {
+            method: "POST",
+            body: chunkFormData
+          });
+          
+          if (!chunkResponse.ok) {
+            throw new Error(`Failed to upload chunk ${i + 1}/${totalChunks}`);
+          }
+        }
+        
+        // Assemble and analyze
+        response = await fetch("/api/analyze-pdf-chunked", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...headers
+          },
+          body: JSON.stringify({
+            fileId,
+            totalChunks,
+            originalname: file.name,
+            mimetype: file.type,
+            targetExams: "HSSC CET Group C, Group D, HSSC Constable, NCERT"
+          })
+        });
+
+      } else {
+        // Normal upload for small files
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("targetExams", "HSSC CET Group C, Group D, HSSC Constable, NCERT");
+
+        response = await fetch("/api/analyze-pdf", {
+          method: "POST",
+          headers,
+          body: formData,
+        });
+      }
 
       const responseText = await response.text();
       let data;

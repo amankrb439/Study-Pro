@@ -413,6 +413,7 @@ export function DocumentView() {
                   onPointerDown={(e) => handlePointerDown(e, chapter.id)}
                   onPointerUp={handlePointerUp}
                   onPointerLeave={handlePointerLeave}
+                  onPointerCancel={handlePointerUp}
                   onClick={(e) => {
                     if (didLongPressRef.current) {
                       didLongPressRef.current = false;
@@ -535,7 +536,7 @@ export function DocumentView() {
                   </div>
 
                   {/* 1. Long Pressing Feedback Progress Overlay */}
-                  {pressingChapterId === chapter.id && pressingProgress >= 15 && (
+                  {pressingChapterId === chapter.id && pressingProgress >= 25 && (
                     <div 
                       className="absolute inset-0 bg-black/50 dark:bg-black/70 backdrop-blur-[1px] z-30 flex flex-col items-center justify-center text-white pointer-events-none animate-fade-in"
                       onClick={(e) => e.stopPropagation()}
@@ -546,7 +547,7 @@ export function DocumentView() {
                         <div className="w-32 h-2 bg-white/20 rounded-full overflow-hidden mt-1">
                           <div 
                             className="h-full bg-gradient-to-r from-amber-400 to-rose-500 rounded-full transition-all duration-75"
-                            style={{ width: `${Math.round(((pressingProgress - 15) / 85) * 100)}%` }}
+                            style={{ width: `${Math.round(((pressingProgress - 25) / 75) * 100)}%` }}
                           />
                         </div>
                       </div>

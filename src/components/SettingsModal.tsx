@@ -410,7 +410,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               )}
             >
               <XCircle className="w-4 h-4" />
-              <span>{confirmWipe ? "⚠️ CONFIRM: PERMANENTLY ERASE ALL CHAPTERS & SYLLABUSES?" : "Permanently Wipe All Chapters & PDFs"}</span>
+              <span>{confirmWipe ? "⚠️ CONFIRM: PERMANENTLY DELETE ALL CHAPTERS & QUESTIONS?" : "Permanently Delete Chapters, Questions and Syllabus PDFs"}</span>
             </button>
 
             <button 

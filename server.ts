@@ -405,6 +405,14 @@ app.post("/api/files/delete", (req, res) => {
     if (fs.existsSync(permanentPath)) {
       fs.unlinkSync(permanentPath);
       console.log(`[File System] Successfully deleted source file permanently: ${filename}`);
+      
+      // Also delete the cached JSON analysis file if it exists
+      const jsonPath = permanentPath.replace(/\.pdf$/, ".json");
+      if (fs.existsSync(jsonPath)) {
+        fs.unlinkSync(jsonPath);
+        console.log(`[File System] Successfully deleted associated JSON cache file: ${jsonPath}`);
+      }
+      
       res.json({ success: true });
     } else {
       console.log(`[File System] File to delete not found: ${filename}`);
@@ -413,6 +421,26 @@ app.post("/api/files/delete", (req, res) => {
   } catch (e: any) {
     console.error("Failed to delete permanent file on server:", e);
     res.status(500).json({ error: "Failed to delete file: " + e.message });
+  }
+});
+
+// Wipes all physical uploaded files and cached analyses from server disk permanently
+app.post("/api/files/wipe-all", (req, res) => {
+  try {
+    if (fs.existsSync(UPLOADS_DIR)) {
+      const files = fs.readdirSync(UPLOADS_DIR);
+      files.forEach((file) => {
+        const filePath = path.join(UPLOADS_DIR, file);
+        if (fs.statSync(filePath).isFile()) {
+          fs.unlinkSync(filePath);
+        }
+      });
+      console.log("[File System] Successfully wiped all uploaded files and cached analyses.");
+    }
+    res.json({ success: true });
+  } catch (e: any) {
+    console.error("[File System] Failed to wipe upload directory:", e);
+    res.status(500).json({ error: "Failed to wipe files: " + e.message });
   }
 });
 

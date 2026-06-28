@@ -694,7 +694,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       console.log("[Wipe] Manual permanent wipe initiated...");
       
-      // 1. Reset subjects to default subjects (which have empty documents)
+      // 1. Permanently delete all physical source files and cached analyses on server
+      try {
+        await fetch("/api/files/wipe-all", {
+          method: "POST"
+        });
+        console.log("[Wipe] Wiped all physical source files and cached JSONs on the backend server.");
+      } catch (e) {
+        console.warn("[Wipe] Failed to tell server to wipe physical uploads:", e);
+      }
+      
+      // 2. Reset subjects to default subjects (which have empty documents)
       const freshSubjects = DEFAULT_SUBJECTS.map(s => ({
         ...s,
         id: "subj-" + s.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
@@ -703,13 +713,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       }));
       await setLocalItem("examship_subjects", freshSubjects);
       
-      // 2. Clear all questions and quiz sets permanently
+      // 3. Clear all questions and quiz sets permanently
       await clearAllQuestionsAndSets();
 
-      // 3. Mark wipe completed
+      // 4. Mark wipe completed
       localStorage.setItem("examship_chapters_wipe_v4_completed", "true");
       
-      // 4. Update state
+      // 5. Update state
       set({
         subjects: freshSubjects,
         activeSubject: null,

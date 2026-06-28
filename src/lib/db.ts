@@ -237,24 +237,6 @@ export async function setLocalItem<T>(key: string, value: T) {
         batch.set(docRef, JSON.parse(JSON.stringify(sub)));
       });
       await withTimeout(batch.commit(), 15000, "Firestore subjects batch commit timeout");
-    } else if (key === "examship_quiz_sets" && Array.isArray(value)) {
-      const batch = writeBatch(db);
-      value.forEach((qs: any) => {
-        const docRef = doc(db, "quiz_sets", qs.id);
-        batch.set(docRef, JSON.parse(JSON.stringify(qs)));
-      });
-      await withTimeout(batch.commit(), 15000, "Firestore quiz sets batch commit timeout");
-    } else if (key === "examship_questions" && Array.isArray(value)) {
-      const batchSize = 400;
-      for (let i = 0; i < value.length; i += batchSize) {
-        const chunk = value.slice(i, i + batchSize);
-        const subBatch = writeBatch(db);
-        chunk.forEach((q: any) => {
-          const docRef = doc(db, "questions", q.id);
-          subBatch.set(docRef, JSON.parse(JSON.stringify(q)));
-        });
-        await withTimeout(subBatch.commit(), 15000, "Firestore questions subbatch commit timeout");
-      }
     } else if (key === "examship_user_stats") {
       const docRef = doc(db, "global_stats", "public_stats");
       await withTimeout(setDoc(docRef, JSON.parse(JSON.stringify(value))), 10000, "Firestore user stats setDoc timeout");
@@ -324,25 +306,78 @@ export async function saveQuestions(newQuestions: Question[]) {
   const existingMap = new Set(existing.map((q) => `${q.chapterId}_${q.question}`));
   const uniqueNew = newQuestions.filter((q) => !existingMap.has(`${q.chapterId}_${q.question}`));
   
+  if (uniqueNew.length === 0) return;
+
   const updated = [...existing, ...uniqueNew];
-  await setLocalItem("examship_questions", updated);
+  
+  // 1. Update local storage and cache immediately
+  dbCache["examship_questions"] = updated;
+  try {
+    localStorage.setItem("examship_questions", JSON.stringify(updated));
+  } catch (e) {
+    console.warn("Could not save backup copy of questions to localStorage:", e);
+  }
+
+  if (firestoreQuotaExceeded) return;
+
+  // 2. Only write the NEW questions to Firestore to prevent massive batch timeouts
+  try {
+    const batchSize = 400;
+    for (let i = 0; i < uniqueNew.length; i += batchSize) {
+      const chunk = uniqueNew.slice(i, i + batchSize);
+      const subBatch = writeBatch(db);
+      chunk.forEach((q) => {
+        const docRef = doc(db, "questions", q.id);
+        subBatch.set(docRef, JSON.parse(JSON.stringify(q)));
+      });
+      await withTimeout(subBatch.commit(), 15000, "Firestore questions subbatch commit timeout");
+    }
+  } catch (e) {
+    console.error("Firestore write failed for new questions:", e);
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("resource-exhausted") || msg.toLowerCase().includes("timeout")) {
+      handleQuotaExceeded();
+    }
+  }
 }
 
 export async function clearAllQuestionsAndSets() {
-  await setLocalItem("examship_questions", []);
-  await setLocalItem("examship_quiz_sets", []);
+  dbCache["examship_questions"] = [];
+  try { localStorage.setItem("examship_questions", JSON.stringify([])); } catch(e) {}
+  dbCache["examship_quiz_sets"] = [];
+  try { localStorage.setItem("examship_quiz_sets", JSON.stringify([])); } catch(e) {}
+
+  if (firestoreQuotaExceeded) return;
+
+  try {
+    const qDocs = await getDocs(collection(db, "questions"));
+    const qBatch = writeBatch(db);
+    qDocs.forEach(d => qBatch.delete(d.ref));
+    await withTimeout(qBatch.commit(), 15000);
+
+    const sDocs = await getDocs(collection(db, "quiz_sets"));
+    const sBatch = writeBatch(db);
+    sDocs.forEach(d => sBatch.delete(d.ref));
+    await withTimeout(sBatch.commit(), 15000);
+  } catch (e) {
+    console.error("Failed to clear cloud collections:", e);
+  }
 }
 
 export async function clearQuestionsAndSetsForChapter(chapterId: string) {
   const existingQuestions = await getQuestions();
   const questionsToDelete = existingQuestions.filter((q) => q.chapterId === chapterId);
   const filteredQuestions = existingQuestions.filter((q) => q.chapterId !== chapterId);
-  await setLocalItem("examship_questions", filteredQuestions);
+  
+  dbCache["examship_questions"] = filteredQuestions;
+  try { localStorage.setItem("examship_questions", JSON.stringify(filteredQuestions)); } catch (e) {}
 
   const existingSets = await getQuizSets();
   const setsToDelete = existingSets.filter((s) => s.chapterId === chapterId);
   const filteredSets = existingSets.filter((s) => s.chapterId !== chapterId);
-  await setLocalItem("examship_quiz_sets", filteredSets);
+  
+  dbCache["examship_quiz_sets"] = filteredSets;
+  try { localStorage.setItem("examship_quiz_sets", JSON.stringify(filteredSets)); } catch (e) {}
 
   if (firestoreQuotaExceeded) {
     return;
@@ -386,7 +421,20 @@ export async function saveQuizSet(set: QuizSet) {
   } else {
     existing.push(set);
   }
-  await setLocalItem("examship_quiz_sets", existing);
+  
+  dbCache["examship_quiz_sets"] = existing;
+  try {
+    localStorage.setItem("examship_quiz_sets", JSON.stringify(existing));
+  } catch (e) {}
+
+  if (firestoreQuotaExceeded) return;
+
+  try {
+    const docRef = doc(db, "quiz_sets", set.id);
+    await withTimeout(setDoc(docRef, JSON.parse(JSON.stringify(set))), 5000);
+  } catch (e) {
+    console.error("Firestore write failed for quiz set:", e);
+  }
 }
 
 export function calculateStreakFromAttempts(attempts: { playedAt: number }[], streakResetAt?: number): number {

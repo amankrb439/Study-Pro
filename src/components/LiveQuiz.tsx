@@ -170,7 +170,19 @@ export function LiveQuiz({ quizSet, questions, onComplete, onHome, onNextTest }:
   };
 
   const [timeLeft, setTimeLeft] = useState(30);
+  const [isPaused, setIsPaused] = useState(false);
   const [showAnalysis, setShowAnalysis] = useState(false);
+  
+  // Pause timer when document is hidden
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      setIsPaused(document.hidden);
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
   const [showCelebrationModal, setShowCelebrationModal] = useState(false);
   const [showFirstAttemptToast, setShowFirstAttemptToast] = useState(false);
   const [isCompleted, setIsCompleted] = useState(false);
@@ -370,7 +382,7 @@ export function LiveQuiz({ quizSet, questions, onComplete, onHome, onNextTest }:
 
   // Timer countdown cycle (respecting auto-advance when completes)
   useEffect(() => {
-    if (isRevealed || !question) return;
+    if (isRevealed || !question || isPaused) return;
 
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
@@ -397,7 +409,7 @@ export function LiveQuiz({ quizSet, questions, onComplete, onHome, onNextTest }:
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [currentIndex, isRevealed, question]);
+  }, [currentIndex, isRevealed, question, isPaused]);
 
   // Clean timers on exit or change
   useEffect(() => {

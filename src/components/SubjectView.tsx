@@ -135,7 +135,23 @@ export function SubjectView() {
   };
 
   useEffect(() => {
+    if (!activeSubject) return;
     loadStats();
+    
+    // Reset submenu and browse mode when active subject changes
+    const nameLower = activeSubject.name.toLowerCase();
+    const hasSubmenus = nameLower === "history" || nameLower === "science";
+    setActiveSubmenu(hasSubmenus ? null : "all");
+    setBrowseMode(hasSubmenus ? "submenus" : "documents");
+    
+    // Reset search, filters and error states
+    setQuestionSearch("");
+    setSelectedChapterFilter("all");
+    setDeletingChapterId(null);
+    setConfirmDeleteId(null);
+    setIsBulkGenerating(false);
+    setBulkProgress("");
+    setBulkError(null);
   }, [activeSubject]);
 
   const getTargetChaptersForGeneration = () => {

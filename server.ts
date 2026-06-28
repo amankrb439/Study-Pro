@@ -1105,7 +1105,13 @@ app.post("/api/recover-uploads", async (req, res) => {
       }
 
       if (analysisResult && analysisResult.chapters) {
-        const docId = "doc-" + Date.now() + Math.random().toString(36).substring(2, 9);
+        const cleanName = filename
+          .replace(/^\d+_[a-z0-9]+_/, "")
+          .replace(/\.pdf$/, "")
+          .replace(/[_-]/g, " ")
+          .trim();
+
+        const docId = "doc-" + cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
         const stats = fs.statSync(pdfPath);
         
         const cleanFocus = (analysisResult.subjectFocus || "").toLowerCase();
@@ -1135,12 +1141,6 @@ app.post("/api/recover-uploads", async (req, res) => {
           }
         }
 
-        const cleanName = filename
-          .replace(/^\d+_[a-z0-9]+_/, "")
-          .replace(/\.pdf$/, "")
-          .replace(/[_-]/g, " ")
-          .trim();
-
         const recoveredDoc = {
           id: docId,
           subjectId: targetSubjectId,
@@ -1151,15 +1151,23 @@ app.post("/api/recover-uploads", async (req, res) => {
           fileUri: "",
           mimeType: "application/pdf",
           localPath: filename,
-          chapters: analysisResult.chapters.map((c: any) => ({
-             id: "ch-" + Date.now() + Math.random().toString(36).substring(2, 9),
-             documentId: docId,
-             title: c.title,
-             description: c.description,
-             topics: c.topics,
-             importantConcepts: c.importantConcepts || [],
-             estimatedQuestions: c.estimatedQuestions || 20
-          }))
+          chapters: analysisResult.chapters.map((c: any) => {
+            let cleanTitle = c.title.toLowerCase()
+              .replace(/^(chapter|ch|unit)\s*\d+[\s\.\-\)]*/, "")
+              .replace(/^\d+[\s\.\-\)]+/, "")
+              .replace(/[^a-z0-9\u0900-\u097f]+/g, "-")
+              .replace(/^-+|-+$/g, "");
+            if (!cleanTitle) cleanTitle = "chapter";
+            return {
+              id: `ch-${targetSubjectId}-${cleanTitle}`,
+              documentId: docId,
+              title: c.title,
+              description: c.description,
+              topics: c.topics,
+              importantConcepts: c.importantConcepts || [],
+              estimatedQuestions: c.estimatedQuestions || 20
+            };
+          })
         };
 
         recovered.push(recoveredDoc);

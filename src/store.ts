@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { Subject, Document, Chapter, Question, QuizSet, UserStats, AppSettings } from "./types";
 import { getSubjects, getUserStats, initDB, saveSubject, updateUserStats, getQuestions, saveQuestions, clearAllQuestionsAndSets, clearQuestionsAndSetsForChapter, saveApiKey, getApiKey, DEFAULT_SUBJECTS, resetUserStreak, resetUserStats, setLocalItem, getQuizSets } from "./lib/db";
 import { setSoundEnabled } from "./lib/audio";
-import { areChaptersSimilar } from "./lib/similarity";
+import { areChaptersSimilar, generateChapterId } from "./lib/similarity";
 
 export const DEFAULT_SETTINGS: AppSettings = {
   fontSize: "large",
@@ -161,7 +161,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         console.warn("[Recovery] Failed to auto-recover physical files:", recoveryErr);
       }
 
-      // SMART DATABASE SELF-HEALING / RECOVERY MIGRATION
+      // SMART DATABASE SELF-HEALING & DETERMINISTIC ID MIGRATION
       try {
         const allQuestions = await getQuestions().catch(() => [] as Question[]);
         const allQuizSets = await getQuizSets().catch(() => [] as QuizSet[]);
@@ -169,56 +169,55 @@ export const useAppStore = create<AppState>((set, get) => ({
         let questionsUpdated = false;
         let quizSetsUpdated = false;
 
-        // 1. Create a map of all currently existing active and deleted chapter IDs
+        // 1. Convert all existing active and inactive chapters in subjects to deterministic IDs
+        const oldToNewChapterIdMap = new Map<string, string>();
         const activeChapterIds = new Set<string>();
-        const activeChaptersByTitle = new Map<string, { ch: Chapter; doc: Document; sub: Subject }>();
-        const chapterIdToSubjectMap = new Map<string, Subject>();
 
         subjects.forEach(sub => {
           if (sub.documents) {
             sub.documents.forEach(doc => {
               if (doc.chapters) {
                 doc.chapters.forEach(ch => {
-                  activeChapterIds.add(ch.id);
-                  const cleanTitle = ch.title.toLowerCase().trim();
-                  // Prefer active documents for mapping
-                  if (!activeChaptersByTitle.has(cleanTitle) || !doc.isDeleted) {
-                    activeChaptersByTitle.set(cleanTitle, { ch, doc, sub });
+                  const deterministicId = generateChapterId(sub.id, ch.title);
+                  if (ch.id !== deterministicId) {
+                    console.log(`[Migration] Migrating chapter ID from "${ch.id}" to deterministic "${deterministicId}" for chapter "${ch.title}"`);
+                    oldToNewChapterIdMap.set(ch.id, deterministicId);
+                    ch.id = deterministicId;
+                    subjectsUpdated = true;
                   }
-                  chapterIdToSubjectMap.set(ch.id, sub);
+                  if (ch.documentId !== doc.id) {
+                    ch.documentId = doc.id;
+                    subjectsUpdated = true;
+                  }
+                  activeChapterIds.add(ch.id);
                 });
               }
             });
           }
         });
 
-        // 2. Map of old/orphaned chapterId to new active chapterId (for questions & quiz sets)
-        const oldToNewChapterIdMap = new Map<string, string>();
-
-        // Collect all unique chapterIds from questions, quiz sets, and attempts
+        // 2. Map of any orphaned chapter IDs (not currently in activeChapterIds) to active/deterministic ones
+        // Collect all used chapter IDs from questions and quiz sets
         const questionChapterIds = new Set(allQuestions.map(q => q.chapterId));
         const quizSetChapterIds = new Set(allQuizSets.map(s => s.chapterId));
         const attemptChapterIds = new Set(userStats?.attempts?.map(a => a.chapterId) || []);
-
         const allUsedChapterIds = new Set([...questionChapterIds, ...quizSetChapterIds, ...attemptChapterIds]);
 
-        // For each used chapterId, if it's NOT in activeChapterIds, it's orphaned!
         for (const orphanedId of allUsedChapterIds) {
-          if (!orphanedId || activeChapterIds.has(orphanedId)) continue;
+          if (!orphanedId || activeChapterIds.has(orphanedId) || oldToNewChapterIdMap.has(orphanedId)) continue;
 
-          console.log(`[Self-Healing] Detected orphaned chapter ID: ${orphanedId}`);
+          console.log(`[Self-Healing] Found un-migrated or orphaned chapter ID: ${orphanedId}`);
 
-          // Try to find the title of this orphaned chapter
+          // Try to infer its title and subject to see if we can map it to an active chapter
           let inferredTitle: string | null = null;
-          let inferredSubjectName: string | null = null;
-
-          // A. Check userStats attempts
+          
+          // Check userStats attempts
           const attempt = userStats?.attempts?.find(a => a.chapterId === orphanedId);
           if (attempt && attempt.chapterTitle) {
             inferredTitle = attempt.chapterTitle;
           }
 
-          // B. Check if any questions for this chapter have a topic tag
+          // Check if any questions for this chapter have a topic tag
           const sampleQs = allQuestions.filter(q => q.chapterId === orphanedId);
           if (!inferredTitle && sampleQs.length > 0) {
             const tag = sampleQs.find(q => q.topicTag)?.topicTag;
@@ -227,93 +226,37 @@ export const useAppStore = create<AppState>((set, get) => ({
             }
           }
 
-          if (!inferredTitle) {
-            inferredTitle = "Restored Chapter";
-          }
-
-          // Guess the subject of this orphaned chapter
-          if (sampleQs.length > 0) {
-            const qText = sampleQs.map(q => q.question + " " + q.explanation + " " + (q.topicTag || "")).join(" ").toLowerCase();
-            if (qText.includes("physics") || qText.includes("velocity") || qText.includes("force") || qText.includes("motion") || qText.includes("gravity") || qText.includes("energy") || qText.includes("optics") || qText.includes("lens") || qText.includes("refraction") || qText.includes("newton")) {
-              inferredSubjectName = "Physics";
-            } else if (qText.includes("chemistry") || qText.includes("reaction") || qText.includes("acid") || qText.includes("periodic") || qText.includes("element") || qText.includes("atom") || qText.includes("molecule") || qText.includes("bonding") || qText.includes("gas")) {
-              inferredSubjectName = "Chemistry";
-            } else if (qText.includes("biology") || qText.includes("cell") || qText.includes("dna") || qText.includes("gene") || qText.includes("anatomy") || qText.includes("plant") || qText.includes("animal") || qText.includes("blood") || qText.includes("heart")) {
-              inferredSubjectName = "Biology";
-            } else if (qText.includes("english") || qText.includes("tense") || qText.includes("pronoun") || qText.includes("grammar") || qText.includes("verb") || qText.includes("adjective") || qText.includes("preposition") || qText.includes("comprehension")) {
-              inferredSubjectName = "English";
-            } else if (qText.includes("hindi") || qText.includes("व्याकरण") || qText.includes("संधि") || qText.includes("समास")) {
-              inferredSubjectName = "Hindi";
-            } else if (qText.includes("history") || qText.includes("ancient") || qText.includes("medieval") || qText.includes("battle") || qText.includes("king") || qText.includes("empire") || qText.includes("dynasty")) {
-              inferredSubjectName = "Ancient History";
-            }
-          }
-
-          if (!inferredSubjectName) {
-            inferredSubjectName = "Physics";
-          }
-
-          let shouldDeleteOrphanedData = true;
-          let isExplicitlyDeleted = false;
-
-          try {
-            const deletedIds = JSON.parse(localStorage.getItem('deleted_chapter_ids') || '[]');
-            if (deletedIds.includes(orphanedId)) {
-              isExplicitlyDeleted = true;
-            }
-          } catch(e) {}
-
-          let belongsToDeletedDoc = false;
-          subjects.forEach(sub => {
-            sub.documents?.forEach(doc => {
-              if (doc.isDeleted && doc.chapters?.some(c => c.id === orphanedId)) {
-                belongsToDeletedDoc = true;
-              }
-            });
-          });
-
-          if (isExplicitlyDeleted || belongsToDeletedDoc) {
-             shouldDeleteOrphanedData = true;
-          } else {
-            // Now, find if there is an ACTIVE chapter with a similar title in the database
+          if (inferredTitle) {
+            // Check if there is an active chapter with a similar title
             const cleanInferredTitle = inferredTitle.toLowerCase().trim();
-            let matchingActive = activeChaptersByTitle.get(cleanInferredTitle);
+            let matchingChapter: Chapter | null = null;
+            let matchingSubId: string | null = null;
 
-            if (!matchingActive) {
-              const matchingEntry = Array.from(activeChaptersByTitle.values()).find(entry => 
-                areChaptersSimilar(entry.ch.title, inferredTitle!)
-              );
-              if (matchingEntry) {
-                matchingActive = matchingEntry;
-              }
+            subjects.forEach(sub => {
+              sub.documents?.forEach(doc => {
+                if (!doc.isDeleted && doc.chapters) {
+                  doc.chapters.forEach(ch => {
+                    if (ch.title.toLowerCase().trim() === cleanInferredTitle || areChaptersSimilar(ch.title, inferredTitle!)) {
+                      matchingChapter = ch;
+                      matchingSubId = sub.id;
+                    }
+                  });
+                }
+              });
+            });
+
+            if (matchingChapter && matchingSubId) {
+              const targetId = (matchingChapter as Chapter).id;
+              console.log(`[Self-Healing] Mapping orphaned ID "${orphanedId}" to active chapter "${(matchingChapter as Chapter).title}" (ID: ${targetId})`);
+              oldToNewChapterIdMap.set(orphanedId, targetId);
             }
-
-            if (matchingActive && !matchingActive.doc.isDeleted) {
-              console.log(`[Self-Healing] Mapping orphaned ID ${orphanedId} to active chapter "${matchingActive.ch.title}" (ID: ${matchingActive.ch.id})`);
-              oldToNewChapterIdMap.set(orphanedId, matchingActive.ch.id);
-              shouldDeleteOrphanedData = false;
-            }
-          }
-
-          if (shouldDeleteOrphanedData) {
-            console.log(`[Self-Healing] Cleaning up orphaned data for deleted chapter ID: ${orphanedId}`);
-            // Let the cleanup code below handle deletion by mapping it to a special "DELETE" token
-            oldToNewChapterIdMap.set(orphanedId, "__DELETE__");
-            
-            // Also attempt to delete them permanently from Firestore / LocalStorage via the dedicated function
-            try {
-              clearQuestionsAndSetsForChapter(orphanedId).catch(() => {});
-            } catch (err) {}
           }
         }
 
         // 3. Apply the oldToNewChapterIdMap to all questions
         let nextQuestions = allQuestions;
         if (oldToNewChapterIdMap.size > 0) {
-          nextQuestions = allQuestions.filter(q => {
-            const mappedId = oldToNewChapterIdMap.get(q.chapterId);
-            return mappedId !== "__DELETE__";
-          }).map(q => {
+          nextQuestions = allQuestions.map(q => {
             const mappedId = oldToNewChapterIdMap.get(q.chapterId);
             if (mappedId && q.chapterId !== mappedId) {
               questionsUpdated = true;
@@ -321,16 +264,12 @@ export const useAppStore = create<AppState>((set, get) => ({
             }
             return q;
           });
-          if (nextQuestions.length !== allQuestions.length) questionsUpdated = true;
         }
 
         // 4. Apply the oldToNewChapterIdMap to all quiz sets
         let nextQuizSets = allQuizSets;
         if (oldToNewChapterIdMap.size > 0) {
-          nextQuizSets = allQuizSets.filter(set => {
-            const mappedId = oldToNewChapterIdMap.get(set.chapterId);
-            return mappedId !== "__DELETE__";
-          }).map(set => {
+          nextQuizSets = allQuizSets.map(set => {
             const mappedId = oldToNewChapterIdMap.get(set.chapterId);
             if (mappedId && set.chapterId !== mappedId) {
               quizSetsUpdated = true;
@@ -338,16 +277,12 @@ export const useAppStore = create<AppState>((set, get) => ({
             }
             return set;
           });
-          if (nextQuizSets.length !== allQuizSets.length) quizSetsUpdated = true;
         }
 
-        // 5. Apply to attempts
+        // 5. Apply the oldToNewChapterIdMap to user stats attempts
         if (userStats && userStats.attempts && oldToNewChapterIdMap.size > 0) {
           let attemptsUpdated = false;
-          const nextAttempts = userStats.attempts.filter(att => {
-            const mappedId = oldToNewChapterIdMap.get(att.chapterId);
-            return mappedId !== "__DELETE__";
-          }).map(att => {
+          const nextAttempts = userStats.attempts.map(att => {
             const mappedId = oldToNewChapterIdMap.get(att.chapterId);
             if (mappedId && att.chapterId !== mappedId) {
               attemptsUpdated = true;
@@ -355,8 +290,6 @@ export const useAppStore = create<AppState>((set, get) => ({
             }
             return att;
           });
-          if (nextAttempts.length !== userStats.attempts.length) attemptsUpdated = true;
-          
           if (attemptsUpdated) {
             userStats.attempts = nextAttempts;
             await updateUserStats(userStats).catch(console.error);
@@ -502,8 +435,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         throw new Error("No chapters could be extracted from the document. The document might not have a clear structure or table of contents, or it might be unsupported for this subject.");
       }
 
+      const cleanName = file.name
+        .replace(/^\d+_[a-z0-9]+_/, "")
+        .replace(/\.pdf$/, "")
+        .replace(/[_-]/g, " ")
+        .trim();
+        
       const newDoc = {
-        id: "doc-" + Date.now() + Math.random().toString(36).substring(2, 9),
+        id: "doc-" + cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
         subjectId: subjectId,
         name: file.name,
         size: file.size,
@@ -513,7 +452,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         mimeType: data.mimeType,
         localPath: data.localPath,
         chapters: data.analysis.chapters.map((c: any) => ({
-           id: "ch-" + Date.now() + Math.random().toString(36).substring(2, 9),
+           id: generateChapterId(subjectId, c.title),
            documentId: "", // Will be set next
            title: c.title,
            description: c.description,

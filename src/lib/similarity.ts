@@ -3,6 +3,18 @@
  * This handles Hindi/English bilingual text, prefix numbers (1., 2., 22. etc),
  * and minor text variations.
  */
+export function generateChapterId(subjectId: string, chapterTitle: string): string {
+  let cleanTitle = chapterTitle.toLowerCase()
+    .replace(/^(chapter|ch|unit)\s*\d+[\s\.\-\)]*/, "") // Remove "Chapter 1 - ", "Unit 2. "
+    .replace(/^\d+[\s\.\-\)]+/, "") // Remove "1. ", "12) "
+    .replace(/[^a-z0-9\u0900-\u097f]+/g, "-") // Allow English alphanumeric and Devanagari
+    .replace(/^-+|-+$/g, "");
+  if (!cleanTitle) {
+    cleanTitle = "chapter";
+  }
+  return `ch-${subjectId}-${cleanTitle}`;
+}
+
 export function areChaptersSimilar(t1: string, t2: string): boolean {
   const clean = (text: string) => {
     // Remove numbers and periods/spaces/dashes at the start (e.g., "1. ", "12. ", "1 - ")

@@ -253,75 +253,67 @@ export const useAppStore = create<AppState>((set, get) => ({
             inferredSubjectName = "Physics";
           }
 
-          // Now, find if there is an ACTIVE chapter with a similar title in the database
-          const cleanInferredTitle = inferredTitle.toLowerCase().trim();
-          let matchingActive = activeChaptersByTitle.get(cleanInferredTitle);
+          let shouldDeleteOrphanedData = true;
+          let isExplicitlyDeleted = false;
 
-          if (!matchingActive) {
-            const matchingEntry = Array.from(activeChaptersByTitle.values()).find(entry => 
-              areChaptersSimilar(entry.ch.title, inferredTitle!)
-            );
-            if (matchingEntry) {
-              matchingActive = matchingEntry;
+          try {
+            const deletedIds = JSON.parse(localStorage.getItem('deleted_chapter_ids') || '[]');
+            if (deletedIds.includes(orphanedId)) {
+              isExplicitlyDeleted = true;
+            }
+          } catch(e) {}
+
+          let belongsToDeletedDoc = false;
+          subjects.forEach(sub => {
+            sub.documents?.forEach(doc => {
+              if (doc.isDeleted && doc.chapters?.some(c => c.id === orphanedId)) {
+                belongsToDeletedDoc = true;
+              }
+            });
+          });
+
+          if (isExplicitlyDeleted || belongsToDeletedDoc) {
+             shouldDeleteOrphanedData = true;
+          } else {
+            // Now, find if there is an ACTIVE chapter with a similar title in the database
+            const cleanInferredTitle = inferredTitle.toLowerCase().trim();
+            let matchingActive = activeChaptersByTitle.get(cleanInferredTitle);
+
+            if (!matchingActive) {
+              const matchingEntry = Array.from(activeChaptersByTitle.values()).find(entry => 
+                areChaptersSimilar(entry.ch.title, inferredTitle!)
+              );
+              if (matchingEntry) {
+                matchingActive = matchingEntry;
+              }
+            }
+
+            if (matchingActive && !matchingActive.doc.isDeleted) {
+              console.log(`[Self-Healing] Mapping orphaned ID ${orphanedId} to active chapter "${matchingActive.ch.title}" (ID: ${matchingActive.ch.id})`);
+              oldToNewChapterIdMap.set(orphanedId, matchingActive.ch.id);
+              shouldDeleteOrphanedData = false;
             }
           }
 
-          if (matchingActive && !matchingActive.doc.isDeleted) {
-            console.log(`[Self-Healing] Mapping orphaned ID ${orphanedId} to active chapter "${matchingActive.ch.title}" (ID: ${matchingActive.ch.id})`);
-            oldToNewChapterIdMap.set(orphanedId, matchingActive.ch.id);
-          } else {
-            // Recreate/restore the chapter in the appropriate document!
-            const targetSubject = subjects.find(s => s.name.toLowerCase().includes(inferredSubjectName!.toLowerCase())) || subjects[0];
-            if (!targetSubject) continue;
-
-            if (!targetSubject.documents) {
-              targetSubject.documents = [];
-            }
-            let targetDoc = targetSubject.documents.find(d => !d.isDeleted);
-            if (!targetDoc && targetSubject.documents.length > 0) {
-              targetDoc = targetSubject.documents[0];
-            }
-
-            if (!targetDoc) {
-              targetDoc = {
-                id: "doc-restored-" + Date.now() + Math.random().toString(36).substring(2, 5),
-                subjectId: targetSubject.id,
-                name: "Restored Learning Material",
-                size: 0,
-                uploadedAt: Date.now(),
-                totalEstimatedQuestions: 100,
-                chapters: []
-              };
-              targetSubject.documents.push(targetDoc);
-              subjectsUpdated = true;
-            }
-
-            const restoredChapter: Chapter = {
-              id: orphanedId,
-              documentId: targetDoc.id,
-              title: inferredTitle,
-              description: "Automatically recovered chapter",
-              topics: Array.from(new Set(sampleQs.map(q => q.topicTag).filter(Boolean))),
-              importantConcepts: [],
-              estimatedQuestions: 20
-            };
-
-            if (!targetDoc.chapters) {
-              targetDoc.chapters = [];
-            }
-            targetDoc.chapters.push(restoredChapter);
-            console.log(`[Self-Healing] Restored chapter "${restoredChapter.title}" (ID: ${restoredChapter.id}) inside document "${targetDoc.name}" in subject "${targetSubject.name}"`);
-            subjectsUpdated = true;
+          if (shouldDeleteOrphanedData) {
+            console.log(`[Self-Healing] Cleaning up orphaned data for deleted chapter ID: ${orphanedId}`);
+            // Let the cleanup code below handle deletion by mapping it to a special "DELETE" token
+            oldToNewChapterIdMap.set(orphanedId, "__DELETE__");
             
-            activeChapterIds.add(orphanedId);
-            activeChaptersByTitle.set(cleanInferredTitle, { ch: restoredChapter, doc: targetDoc, sub: targetSubject });
+            // Also attempt to delete them permanently from Firestore / LocalStorage via the dedicated function
+            try {
+              clearQuestionsAndSetsForChapter(orphanedId).catch(() => {});
+            } catch (err) {}
           }
         }
 
         // 3. Apply the oldToNewChapterIdMap to all questions
         let nextQuestions = allQuestions;
         if (oldToNewChapterIdMap.size > 0) {
-          nextQuestions = allQuestions.map(q => {
+          nextQuestions = allQuestions.filter(q => {
+            const mappedId = oldToNewChapterIdMap.get(q.chapterId);
+            return mappedId !== "__DELETE__";
+          }).map(q => {
             const mappedId = oldToNewChapterIdMap.get(q.chapterId);
             if (mappedId && q.chapterId !== mappedId) {
               questionsUpdated = true;
@@ -329,12 +321,16 @@ export const useAppStore = create<AppState>((set, get) => ({
             }
             return q;
           });
+          if (nextQuestions.length !== allQuestions.length) questionsUpdated = true;
         }
 
         // 4. Apply the oldToNewChapterIdMap to all quiz sets
         let nextQuizSets = allQuizSets;
         if (oldToNewChapterIdMap.size > 0) {
-          nextQuizSets = allQuizSets.map(set => {
+          nextQuizSets = allQuizSets.filter(set => {
+            const mappedId = oldToNewChapterIdMap.get(set.chapterId);
+            return mappedId !== "__DELETE__";
+          }).map(set => {
             const mappedId = oldToNewChapterIdMap.get(set.chapterId);
             if (mappedId && set.chapterId !== mappedId) {
               quizSetsUpdated = true;
@@ -342,12 +338,16 @@ export const useAppStore = create<AppState>((set, get) => ({
             }
             return set;
           });
+          if (nextQuizSets.length !== allQuizSets.length) quizSetsUpdated = true;
         }
 
         // 5. Apply to attempts
         if (userStats && userStats.attempts && oldToNewChapterIdMap.size > 0) {
           let attemptsUpdated = false;
-          const nextAttempts = userStats.attempts.map(att => {
+          const nextAttempts = userStats.attempts.filter(att => {
+            const mappedId = oldToNewChapterIdMap.get(att.chapterId);
+            return mappedId !== "__DELETE__";
+          }).map(att => {
             const mappedId = oldToNewChapterIdMap.get(att.chapterId);
             if (mappedId && att.chapterId !== mappedId) {
               attemptsUpdated = true;
@@ -355,6 +355,8 @@ export const useAppStore = create<AppState>((set, get) => ({
             }
             return att;
           });
+          if (nextAttempts.length !== userStats.attempts.length) attemptsUpdated = true;
+          
           if (attemptsUpdated) {
             userStats.attempts = nextAttempts;
             await updateUserStats(userStats).catch(console.error);
@@ -366,7 +368,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           await setLocalItem("examship_subjects", subjects).catch(console.error);
         }
         if (questionsUpdated) {
-          await saveQuestions(nextQuestions).catch(console.error);
+          await setLocalItem("examship_questions", nextQuestions).catch(console.error);
         }
         if (quizSetsUpdated) {
           await setLocalItem("examship_quiz_sets", nextQuizSets).catch(console.error);
@@ -435,6 +437,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           }
         }
         
+        const subject = get().subjects.find(s => s.id === subjectId);
+        const subjectName = subject ? subject.name : "";
+
         // Assemble and analyze
         response = await fetch("/api/analyze-pdf-chunked", {
           method: "POST",
@@ -447,15 +452,20 @@ export const useAppStore = create<AppState>((set, get) => ({
             totalChunks,
             originalname: file.name,
             mimetype: file.type,
-            targetExams: "HSSC CET Group C, Group D, HSSC Constable, NCERT"
+            targetExams: "HSSC CET Group C, Group D, HSSC Constable, NCERT",
+            subjectName
           })
         });
 
       } else {
         // Normal upload for small files
+        const subject = get().subjects.find(s => s.id === subjectId);
+        const subjectName = subject ? subject.name : "";
+
         const formData = new FormData();
         formData.append("file", file);
         formData.append("targetExams", "HSSC CET Group C, Group D, HSSC Constable, NCERT");
+        formData.append("subjectName", subjectName);
 
         response = await fetch("/api/analyze-pdf", {
           method: "POST",
@@ -488,6 +498,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ uploadQuotaNotice: data.quotaNotice || data.message });
       }
       
+      if (!data.analysis?.chapters || data.analysis.chapters.length === 0) {
+        throw new Error("No chapters could be extracted from the document. The document might not have a clear structure or table of contents, or it might be unsupported for this subject.");
+      }
+
       const newDoc = {
         id: "doc-" + Date.now() + Math.random().toString(36).substring(2, 9),
         subjectId: subjectId,
@@ -564,7 +578,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const existingDeletedDoc = subject.documents.find(d => d.name === doc.name && d.isDeleted);
       
       if (existingDeletedDoc) {
-        // Revive it, updating the physical file info, but keeping old chapters
+        // Revive it, updating the physical file info. If the existing document had no chapters,
+        // or if the newly extracted chapters are non-empty, we use the newly extracted chapters.
+        const useNewChapters = !existingDeletedDoc.chapters || existingDeletedDoc.chapters.length === 0 || (doc.chapters && doc.chapters.length > 0);
         const newDocs = subject.documents.map(d => 
           d.id === existingDeletedDoc.id ? { 
             ...d, 
@@ -572,7 +588,9 @@ export const useAppStore = create<AppState>((set, get) => ({
             fileUri: doc.fileUri, 
             localPath: doc.localPath, 
             size: doc.size, 
-            mimeType: doc.mimeType 
+            mimeType: doc.mimeType,
+            chapters: useNewChapters ? doc.chapters : d.chapters,
+            totalEstimatedQuestions: useNewChapters ? doc.totalEstimatedQuestions : d.totalEstimatedQuestions
           } : d
         );
         newSubject = { ...subject, documents: newDocs };
@@ -656,6 +674,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         d.id === docId ? { ...d, chapters: updatedChapters } : d
       );
       const updatedSubject = { ...subject, documents: updatedDocs };
+      
+      try {
+        const deletedIds = JSON.parse(localStorage.getItem('deleted_chapter_ids') || '[]');
+        if (!deletedIds.includes(chapterId)) {
+          deletedIds.push(chapterId);
+          localStorage.setItem('deleted_chapter_ids', JSON.stringify(deletedIds));
+        }
+      } catch(e) {}
 
       // 2. Save the updated subject to Firestore & local storage
       await saveSubject(updatedSubject);

@@ -471,12 +471,17 @@ app.post("/api/upload-chunk", upload.single("chunk"), async (req, res) => {
   }
 });
 
-async function analyzeAndReturnPDF(permanentPath: string, originalName: string, mimeType: string, ai: any, res: express.Response) {
+async function analyzeAndReturnPDF(permanentPath: string, originalName: string, mimeType: string, ai: any, res: express.Response, subjectName: string = "") {
   try {
     const uploadedFile = await ai.files.upload({
       file: permanentPath,
       config: { mimeType: mimeType },
     });
+
+    const isEnglishSubject = subjectName.toLowerCase().includes("english");
+    const languageDirective = isEnglishSubject 
+      ? `- The subject is "${subjectName}". DO NOT translate into Hindi. You MUST keep all extracted details ('title', 'description', 'topics', 'importantConcepts', 'subjectFocus') in pure English. Translating English grammar/literature to Hindi breaks the context.`
+      : `- You MUST translate the entire chapter details output into beautifully-formulated, rich Hindi (लिखने में शुद्ध हिन्दी/देवनागरी लिपि का प्रयोग करें). The 'title', 'description', 'topics', 'importantConcepts', and 'subjectFocus' must all be written in clear, competitive exam-level Hindi. You can include standard English terms in parentheses if necessary (e.g., "गति के नियम (Laws of Motion)" or "कोशिका संरचना (Cell Structure)").`;
 
     const response = await generateContentWithRetryAndFallback({
       model: "gemini-3.5-flash",
@@ -488,14 +493,14 @@ async function analyzeAndReturnPDF(permanentPath: string, originalName: string, 
              { text: `Analyze this document which is a study material for standard competitive exams, specifically targeting HSSC CET Group C, Group D, and HSSC Constable syllabi, with close alignment to NCERT textbook structures. 
              
              CRITICAL EXTRACTION DIRECTIVE:
-             - You MUST translate the entire chapter details output into beautifully-formulated, rich Hindi (लिखने में शुद्ध हिन्दी/देवनागरी लिपि का प्रयोग करें). The 'title', 'description', 'topics', 'importantConcepts', and 'subjectFocus' must all be written in clear, competitive exam-level Hindi. You can include standard English terms in parentheses if necessary (e.g., "गति के नियम (Laws of Motion)" or "कोशिका संरचना (Cell Structure)").
-             - Review the entire document thoroughly. FIRST, locate the 'Table of Contents' or 'Index' of the document. Use this as your absolute ground truth for identifying the core chapters.
-             - You MUST extract EVERY single main academic chapter listed in the Table of Contents. If there are 21 main chapters, you must output exactly 21 chapters. If there are 22, output 22. DO NOT stop early. DO NOT skip any main chapters.
-             - EXTREMELY IMPORTANT: Only list the MAIN chapters. DO NOT create separate chapters for small tables, sub-sections, or headings. DO NOT split a single continuous chapter into multiple parts. A single numbered chapter in the book must be exactly ONE chapter in the output.
-             - Group all topics, important concepts, and sub-headings belonging to a main chapter tightly under that single chapter's entry.
+             ${languageDirective}
+             - Review the entire document thoroughly. FIRST, look for a 'Table of Contents', 'Index', or outline of the document. If a formal 'Table of Contents' or 'Index' is present, use it as your absolute ground truth for identifying the core chapters. If NO formal 'Table of Contents' or 'Index' is found in the document, you MUST analyze the document's content itself, identify the major headings, parts, chapters, or units, and extract them as chapters. Under no circumstances should you return an empty list of chapters if the document contains study material or notes. For notes, study guides, or revision sheets, treat each major topic/section (such as 'Nouns', 'Pronouns', 'Tenses', 'Active and Passive Voice', 'Direct & Indirect Speech' for English grammar) as a distinct chapter.
+             - You MUST extract EVERY single main academic chapter or major section. If there are 10 main sections/chapters, you must output exactly 10 chapters. DO NOT stop early. DO NOT skip any main chapters or sections.
+             - EXTREMELY IMPORTANT: Only list the MAIN chapters or major sections. DO NOT create separate chapters for small tables, sub-sections, or minor headings. DO NOT split a single continuous chapter into multiple parts.
+             - Group all topics, important concepts, and sub-headings belonging to a main chapter/section tightly under that single chapter's entry.
              - Analyze deeply to extract high-yield 'topics' and 'importantConcepts' for each chapter based on actual content. Arrange them well.
-             - DO NOT include entries for auxiliary pages, Table of Contents, Index, Checklist, Appendices, Preface, Acknowledgment, References, Lists of Tables/Figures, or conversion / physical constant tables. ONLY list main core academic chapters.
-             - Maintain a strict 1-to-1 chapter structure matching the main chapters of the original textbook. Ensure ABSOLUTELY NO main chapters are skipped. Make this the best, most accurate reflection of the document's structure.
+             - DO NOT include entries for auxiliary pages, Table of Contents, Index, Checklist, Appendices, Preface, Acknowledgment, References, Lists of Tables/Figures, or conversion / physical constant tables. ONLY list main core academic chapters or topics.
+             - Maintain a strict structure matching the main chapters or sections of the original textbook or notes. Ensure ABSOLUTELY NO main chapters/sections are skipped. Make this the best, most accurate reflection of the document's structure.
              - DO NOT use outside knowledge. ONLY extract from the document contents.
              - Estimate the total potential high-quality, exam-oriented questions that can be generated for each chapter (between 20 and 50 questions).` }
            ]
@@ -576,7 +581,7 @@ async function analyzeAndReturnPDF(permanentPath: string, originalName: string, 
 
 app.post("/api/analyze-pdf-chunked", express.json({ limit: "100mb" }), async (req, res) => {
   try {
-    const { fileId, totalChunks, originalname, mimetype } = req.body;
+    const { fileId, totalChunks, originalname, mimetype, subjectName } = req.body;
     
     initServerDb();
     const cleanName = originalname.replace(/[^a-zA-Z0-9\.\-_]/g, "_");
@@ -608,7 +613,7 @@ app.post("/api/analyze-pdf-chunked", express.json({ limit: "100mb" }), async (re
       });
     }
 
-    await analyzeAndReturnPDF(permanentPath, originalname, mimetype, ai, res);
+    await analyzeAndReturnPDF(permanentPath, originalname, mimetype, ai, res, subjectName || "");
   } catch (err: any) {
     res.status(500).json({ error: err.message || "Failed to assemble and analyze chunks" });
   }
@@ -625,7 +630,7 @@ app.post("/api/analyze-pdf", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "The uploaded file is too small to be a valid PDF document. Please upload a real PDF." });
     }
 
-    const { targetExams } = req.body;
+    const { targetExams, subjectName } = req.body;
     
     // Save file permanently on the server's disk
     initServerDb();
@@ -646,13 +651,13 @@ app.post("/api/analyze-pdf", upload.single("file"), async (req, res) => {
          mimeType: req.file.mimetype,
          originalName: req.file.originalname,
          localPath: path.basename(permanentPath),
-         analysis: generateDynamicFallbackAnalysis(req.file.originalname),
+         analysis: generateDynamicFallbackAnalysis(req.file.originalname, subjectName || ""),
          isQuotaFallback: true,
          quotaNotice: getQuotaFallbackNotice("Flash-based PDF upload logic")
       });
     }
 
-    await analyzeAndReturnPDF(permanentPath, req.file.originalname, req.file.mimetype, ai, res);
+    await analyzeAndReturnPDF(permanentPath, req.file.originalname, req.file.mimetype, ai, res, subjectName || "");
   } catch (error: any) {
     const msg = error?.message || String(error);
     const friendlyError = formatGeminiError(error);
@@ -838,13 +843,19 @@ app.post("/api/generate-questions", async (req, res) => {
       ? `\nKey high-yield concepts identified in this chapter which MUST be thoroughly tested in the questions:\n${importantConcepts.map((c: string) => `- ${c}`).join("\n")}`
       : "";
 
-    const promptText = `Focus EXCLUSIVELY and STRICTLY on the chapter content provided for "${chapterTitle}" which covers the topics: ${(topics || []).join(", ")}.${conceptsText}
+    const promptText = `Focus EXCLUSIVELY and STRICTLY on the chapter titled "${chapterTitle}".
+    The topics in this chapter are: ${(topics || []).join(", ")}.${conceptsText}
     
     You are an expert tutor and an examiner setting papers for competitive exams, specifically targeting HSSC CET (Group C and Group D) and HSSC Constable exam syllabi. Think exactly like a senior examiner of Haryana Staff Selection Commission (HSSC) when choosing which questions to ask.
-    Your task is to analyze the uploaded chapter very deeply and identify the most crucial, high-yield, exam-oriented concepts. Generate ONLY high-priority, premium-quality multiple choice questions that are highly likely to be asked in the HSSC CET Group C, Group D, or HSSC Constable exams. Do not generate irrelevant, tangential, extraneous, or general trivia filler questions.
-
+    Your task is to analyze the uploaded document, LOCATE the exact chapter titled "${chapterTitle}", and generate questions ONLY from the text of that specific chapter.
+    
     CRITICAL REQUIREMENTS:
-    1. EXCLUSIVELY GROUNDED IN THE PROVIDED CHAPTER: Every single question must be formed ONLY from the content of this specific chapter ("${chapterTitle}"). Do NOT pick up facts or questions from other chapters of the book, nor from unrestricted external context. The questions must be 100% grounded in the uploaded file content of this specific chapter. General knowledge questions that do not reside within this specific text are STRICTLY FORBIDDEN.
+    1. EXCLUSIVELY GROUNDED IN THE PROVIDED CHAPTER: You MUST locate the chapter "${chapterTitle}" in the document. Every single question must be formed ONLY from the content found WITHIN the boundaries of this specific chapter. 
+    - DO NOT pick up facts, questions, or concepts from ANY other chapters of the book.
+    - DO NOT use unrestricted external context or outside knowledge.
+    - If a topic is discussed in multiple chapters, only use the information presented in "${chapterTitle}".
+    - The questions must be 100% grounded in the uploaded file content of this specific chapter. General knowledge questions that do not reside within this specific text are STRICTLY FORBIDDEN.
+    - ANY violation of this rule (using data from other chapters) is a critical failure.
     2. TARGET EXAMS: HSSC CET Group C, HSSC CET Group D, and HSSC Constable exams. Tap into the standard difficulty, phrasing, and facts expected in Haryana staff selection papers.
     3. NCERT STANDARDS: Align strictly with the basic factual foundation of the NCERT textbooks (as HSSC CET and Constable papers rely heavily on standard NCERT conceptual benchmarks), but only using the concepts present in this specific chapter.
     4. MANDATORY HINDI LANGUAGE (हिन्दी भाषा): All fields ('question', 'options', 'correctAnswer', 'explanation', 'topicTag') MUST be in Hindi. Use simple, standard, clear, and extremely easy-to-understand Hindi (Devanagari script) matching the exact vocabulary of HSSC CET and HSSC Constable exams. For scientific, historical, or technical terms, provide the standard Hindi translation and put the English term in brackets if helpful (e.g., 'अपवर्तन (Refraction)' or 'कोशिका झिल्ली (Cell Membrane)'). The options must be entirely in Hindi and the correctAnswer must match the correct option exactly.
@@ -1168,7 +1179,7 @@ app.get("/api/health", (req, res) => {
 });
 
 // Safety net: Any unhandled /api route returns 404 JSON instead of falling through to SPA HTML
-app.use("/api/*", (req, res) => {
+app.use("/api", (req, res) => {
   res.status(404).json({ error: "API route not found: " + req.originalUrl });
 });
 
@@ -1178,10 +1189,110 @@ function getQuotaFallbackNotice(context: string) {
   return `Gemini API quota exceeded during ${context}. Using local simulated fallback data to keep you moving forward! To use live generation, add your API key in settings.`;
 }
 
-function generateDynamicFallbackAnalysis(fileName: string) {
+function generateDynamicFallbackAnalysis(fileName: string, subjectName: string = "") {
+  const fileLower = fileName.toLowerCase();
+  const subjLower = subjectName.toLowerCase();
+  
+  if (fileLower.includes("english") || subjLower.includes("english")) {
+    return {
+      subjectFocus: "English Grammar & Comprehension",
+      totalEstimatedQuestions: 120,
+      chapters: [
+        {
+          title: "1. Parts of Speech",
+          description: "Comprehensive study of Nouns, Pronouns, Adjectives, Verbs, Adverbs, Prepositions, Conjunctions, and Interjections.",
+          topics: ["Nouns & Pronouns", "Verb Conjugations", "Adjectives & Adverbs", "Prepositions"],
+          importantConcepts: ["Subject-Verb Agreement", "Relative Pronouns", "Prepositional Phrases"],
+          estimatedQuestions: 30
+        },
+        {
+          title: "2. Tenses & Voice",
+          description: "Understanding active/passive voice constructions and all major tense forms.",
+          topics: ["Present, Past & Future Tenses", "Active to Passive Conversion", "Passive to Active Conversion"],
+          importantConcepts: ["Aspect and Mood", "Auxiliary Verbs in Voice Change"],
+          estimatedQuestions: 30
+        },
+        {
+          title: "3. Direct & Indirect Speech",
+          description: "Rules for converting direct narration into reported speech.",
+          topics: ["Reporting Verbs", "Tense shifts in indirect speech", "Pronoun adjustments"],
+          importantConcepts: ["Universal Truth Exceptions", "Imperative and Exclamatory narration"],
+          estimatedQuestions: 30
+        },
+        {
+          title: "4. Sentence Synthesis & Common Errors",
+          description: "Identifying grammatical mistakes and structuring coherent sentences.",
+          topics: ["Spotting errors", "Clause correction", "Sentence combining"],
+          importantConcepts: ["Dangling Modifiers", "Parallel Structure"],
+          estimatedQuestions: 30
+        }
+      ]
+    };
+  }
+  
+  if (fileLower.includes("hindi") || subjLower.includes("hindi")) {
+    return {
+      subjectFocus: "हिन्दी व्याकरण (Hindi Grammar)",
+      totalEstimatedQuestions: 120,
+      chapters: [
+        {
+          title: "1. वर्ण विचार और वर्तनी (Phonology & Spelling)",
+          description: "स्वर, व्यंजन और उनके उच्चारण स्थानों का अध्ययन।",
+          topics: ["स्वर और व्यंजन", "उच्चारण स्थान", "वर्तनी शुद्धि"],
+          importantConcepts: ["अल्पप्राण और महाप्राण", "घोष और अघोष"],
+          estimatedQuestions: 30
+        },
+        {
+          title: "2. शब्द विचार और संधि (Morphology & Joinings)",
+          description: "तत्सम-तद्भव, संज्ञा, सर्वनाम और संधि के नियम।",
+          topics: ["शब्द भेद", "स्वर संधि", "व्यंजन और विसर्ग संधि"],
+          importantConcepts: ["संधि विच्छेद नियम", "तत्सम और तद्भव पहचान"],
+          estimatedQuestions: 30
+        },
+        {
+          title: "3. समास और कारक (Compounds & Case)",
+          description: "समास के भेद और कारकों का वाक्य में प्रयोग।",
+          topics: ["समास के छह भेद", "कारक चिन्ह और प्रयोग", "पहचान विधि"],
+          importantConcepts: ["अव्ययीभाव और बहुव्रीहि समास", "अपादान कारक विशेष"],
+          estimatedQuestions: 30
+        }
+      ]
+    };
+  }
+
+  if (fileLower.includes("computer") || subjLower.includes("computer")) {
+    return {
+      subjectFocus: "Computer Awareness & IT",
+      totalEstimatedQuestions: 90,
+      chapters: [
+        {
+          title: "1. Introduction to Computers",
+          description: "Fundamentals, generations, and core components of computer systems.",
+          topics: ["Hardware & Software", "Generations of Computers", "Input & Output Devices"],
+          importantConcepts: ["CPU Architecture", "RAM vs ROM"],
+          estimatedQuestions: 30
+        },
+        {
+          title: "2. Operating Systems & MS Office",
+          description: "Concepts of OS and practical tools like MS Word, Excel, and PowerPoint.",
+          topics: ["OS Functions", "MS Word shortcuts", "Excel Formulas"],
+          importantConcepts: ["Process Management", "Spreadsheet logic"],
+          estimatedQuestions: 30
+        },
+        {
+          title: "3. Networking & Internet Security",
+          description: "Network topologies, protocols, and cyber security basics.",
+          topics: ["LAN, WAN, MAN", "TCP/IP Protocol", "Malware & Firewalls"],
+          importantConcepts: ["IP Addressing", "Symmetric Cryptography"],
+          estimatedQuestions: 30
+        }
+      ]
+    };
+  }
+
   return {
-    subjectFocus: "Simulated Physics/Science (Fallback Data)",
-    totalEstimatedQuestions: 150,
+    subjectFocus: "Simulated Science & General Knowledge",
+    totalEstimatedQuestions: 90,
     chapters: [
       {
         title: "1. गति और बल (Motion & Force)",
@@ -1195,14 +1306,14 @@ function generateDynamicFallbackAnalysis(fileName: string) {
         description: "गुरुत्वाकर्षण बल और उसके प्रभावों का विश्लेषण।",
         topics: ["केप्लर के नियम", "सार्वत्रिक गुरुत्वाकर्षण नियम"],
         importantConcepts: ["G का मान", "पलायन वेग"],
-        estimatedQuestions: 25
+        estimatedQuestions: 30
       },
       {
         title: "3. कार्य, ऊर्जा और शक्ति (Work, Energy & Power)",
         description: "कार्य और ऊर्जा के बीच संबंध।",
         topics: ["गतिज ऊर्जा", "स्थितिज ऊर्जा", "शक्ति की परिभाषा"],
         importantConcepts: ["ऊर्जा संरक्षण का नियम"],
-        estimatedQuestions: 40
+        estimatedQuestions: 30
       }
     ]
   };

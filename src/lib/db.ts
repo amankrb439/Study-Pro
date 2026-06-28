@@ -8,7 +8,8 @@ import {
   collection, 
   query, 
   where, 
-  writeBatch 
+  writeBatch,
+  disableNetwork
 } from "firebase/firestore";
 
 export enum OperationType {
@@ -75,10 +76,40 @@ export const DEFAULT_SUBJECTS: Omit<Subject, 'id' | 'createdAt'>[] = [
 
 let dbCache: Record<string, any> = {};
 
+function _readFromLocal<T>(key: string, defaultValue: T): T {
+  try {
+    const localVal = localStorage.getItem(key);
+    if (localVal !== null) {
+      const parsed = JSON.parse(localVal);
+      dbCache[key] = parsed;
+      return parsed;
+    }
+  } catch (e) {
+    console.error(`Failed to read fallback ${key} from localStorage:`, e);
+    try {
+      localStorage.removeItem(key);
+      console.log(`[Self-Healing] Removed corrupted localStorage key: ${key}`);
+    } catch (clearErr) {}
+  }
+  return defaultValue;
+}
+
+// Helper to run any promise with a timeout
+export function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage = "Operation timed out"): Promise<T> {
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(errorMessage)), timeoutMs)
+  );
+  return Promise.race([promise, timeoutPromise]);
+}
+
 // Helper to get raw data from Firestore with high-fidelity localStorage fallback
 export async function getLocalItem<T>(key: string, defaultValue: T): Promise<T> {
   if (dbCache[key] !== undefined) {
     return dbCache[key];
+  }
+
+  if (firestoreQuotaExceeded) {
+    return _readFromLocal(key, defaultValue);
   }
 
   // 1. Try to read from Firestore (with a 3-second timeout so we don't hang if offline/poor connection)
@@ -150,28 +181,36 @@ export async function getLocalItem<T>(key: string, defaultValue: T): Promise<T> 
   } catch (e) {
     console.warn(`Failed to fetch ${key} from Firestore. Falling back to localStorage. Error:`, e);
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg.toLowerCase().includes("permission") || msg.toLowerCase().includes("insufficient")) {
+    if (msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("resource-exhausted")) {
+      handleQuotaExceeded();
+    } else if (msg.toLowerCase().includes("permission") || msg.toLowerCase().includes("insufficient")) {
       handleFirestoreError(e, OperationType.GET, key);
     }
   }
 
   // 2. Fall back to local storage replica
-  try {
-    const localVal = localStorage.getItem(key);
-    if (localVal !== null) {
-      const parsed = JSON.parse(localVal);
-      dbCache[key] = parsed;
-      return parsed;
-    }
-  } catch (e) {
-    console.error(`Failed to read fallback ${key} from localStorage:`, e);
-    try {
-      localStorage.removeItem(key);
-      console.log(`[Self-Healing] Removed corrupted localStorage key: ${key}`);
-    } catch (clearErr) {}
-  }
+  return _readFromLocal(key, defaultValue);
+}
 
-  return defaultValue;
+let firestoreQuotaExceeded = false;
+try {
+  const quotaFlag = localStorage.getItem('firestore_quota_exceeded');
+  if (quotaFlag && Date.now() < parseInt(quotaFlag)) {
+    firestoreQuotaExceeded = true;
+  } else {
+    localStorage.removeItem('firestore_quota_exceeded');
+  }
+} catch (e) {}
+
+function handleQuotaExceeded() {
+  if (!firestoreQuotaExceeded) {
+    console.warn("Firestore quota exceeded. Disabling cloud sync. Data will be saved locally.");
+    firestoreQuotaExceeded = true;
+    try {
+      localStorage.setItem('firestore_quota_exceeded', (Date.now() + 12 * 3600 * 1000).toString());
+      disableNetwork(db).catch(err => console.warn("Failed to disable network:", err));
+    } catch (e) {}
+  }
 }
 
 // Helper to set item in Firestore with local backup
@@ -185,6 +224,10 @@ export async function setLocalItem<T>(key: string, value: T) {
     console.warn(`Could not save backup copy of ${key} to localStorage:`, e);
   }
 
+  if (firestoreQuotaExceeded) {
+    return;
+  }
+
   // 2. Update Firestore and await the write to guarantee permanent saving
   try {
     if (key === "examship_subjects" && Array.isArray(value)) {
@@ -193,14 +236,14 @@ export async function setLocalItem<T>(key: string, value: T) {
         const docRef = doc(db, "subjects", sub.id);
         batch.set(docRef, JSON.parse(JSON.stringify(sub)));
       });
-      await batch.commit();
+      await withTimeout(batch.commit(), 15000, "Firestore subjects batch commit timeout");
     } else if (key === "examship_quiz_sets" && Array.isArray(value)) {
       const batch = writeBatch(db);
       value.forEach((qs: any) => {
         const docRef = doc(db, "quiz_sets", qs.id);
         batch.set(docRef, JSON.parse(JSON.stringify(qs)));
       });
-      await batch.commit();
+      await withTimeout(batch.commit(), 15000, "Firestore quiz sets batch commit timeout");
     } else if (key === "examship_questions" && Array.isArray(value)) {
       const batchSize = 400;
       for (let i = 0; i < value.length; i += batchSize) {
@@ -210,21 +253,30 @@ export async function setLocalItem<T>(key: string, value: T) {
           const docRef = doc(db, "questions", q.id);
           subBatch.set(docRef, JSON.parse(JSON.stringify(q)));
         });
-        await subBatch.commit();
+        await withTimeout(subBatch.commit(), 15000, "Firestore questions subbatch commit timeout");
       }
     } else if (key === "examship_user_stats") {
       const docRef = doc(db, "global_stats", "public_stats");
-      await setDoc(docRef, JSON.parse(JSON.stringify(value)));
+      await withTimeout(setDoc(docRef, JSON.parse(JSON.stringify(value))), 10000, "Firestore user stats setDoc timeout");
     } else {
       const docRef = doc(db, "appData", key);
       const sanitizedValue = value !== undefined ? JSON.parse(JSON.stringify(value)) : null;
-      await setDoc(docRef, { value: sanitizedValue });
+      await withTimeout(setDoc(docRef, { value: sanitizedValue }), 10000, "Firestore general setDoc timeout");
     }
   } catch (e) {
-    console.error(`Firestore write failed for ${key}:`, e);
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg.toLowerCase().includes("permission") || msg.toLowerCase().includes("insufficient")) {
-      handleFirestoreError(e, OperationType.WRITE, key);
+    const isExpectedNetworkIssue = msg.toLowerCase().includes("quota") || 
+                                   msg.toLowerCase().includes("resource-exhausted") || 
+                                   msg.toLowerCase().includes("timeout");
+    
+    if (isExpectedNetworkIssue) {
+      console.warn(`Firestore offline fallback triggered for ${key}:`, msg);
+      handleQuotaExceeded();
+    } else {
+      console.error(`Firestore write failed for ${key}:`, e);
+      if (msg.toLowerCase().includes("permission") || msg.toLowerCase().includes("insufficient")) {
+        handleFirestoreError(e, OperationType.WRITE, key);
+      }
     }
   }
 }
@@ -292,6 +344,10 @@ export async function clearQuestionsAndSetsForChapter(chapterId: string) {
   const filteredSets = existingSets.filter((s) => s.chapterId !== chapterId);
   await setLocalItem("examship_quiz_sets", filteredSets);
 
+  if (firestoreQuotaExceeded) {
+    return;
+  }
+
   // Permanently delete the specific filtered-out questions and sets from Firestore
   try {
     const batch = writeBatch(db);
@@ -303,10 +359,14 @@ export async function clearQuestionsAndSetsForChapter(chapterId: string) {
       const docRef = doc(db, "quiz_sets", s.id);
       batch.delete(docRef);
     });
-    await batch.commit();
+    await withTimeout(batch.commit(), 15000, "Firestore clear batch commit timeout");
     console.log(`[Firestore] Permanently deleted ${questionsToDelete.length} questions and ${setsToDelete.length} quiz sets for chapter: ${chapterId}`);
-  } catch (err) {
+  } catch (err: any) {
     console.warn("[Firestore] Failed to batch delete chapter records:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("resource-exhausted") || msg.toLowerCase().includes("timeout")) {
+      handleQuotaExceeded();
+    }
   }
 }
 

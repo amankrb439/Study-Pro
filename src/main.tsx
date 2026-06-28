@@ -9,6 +9,8 @@ window.addEventListener('error', (e) => {
   const errorText = String(e.message || "").toLowerCase();
   if (errorText.includes('resizeobserver') || 
       errorText.includes('script error') ||
+      errorText.includes('resource-exhausted') ||
+      errorText.includes('quota') ||
       errorText === '') {
       
     e.stopImmediatePropagation();
@@ -19,11 +21,47 @@ window.addEventListener('error', (e) => {
 window.addEventListener('unhandledrejection', (e) => {
   const reasonText = String(e.reason?.message || e.reason || "").toLowerCase();
   if (reasonText.includes('resizeobserver') || 
-      reasonText.includes('script error')) {
+      reasonText.includes('script error') ||
+      reasonText.includes('resource-exhausted') ||
+      reasonText.includes('quota')) {
     e.stopImmediatePropagation();
     e.preventDefault();
   }
 }, true);
+
+// Suppress Firestore quota logging spam from native SDK
+const originalConsoleError = console.error;
+console.error = function (...args) {
+  try {
+    const msg = args.map(a => (typeof a === 'object' && a !== null ? (a.message || String(a)) : String(a))).join(' ').toLowerCase();
+    if (
+      msg.includes('resource-exhausted') ||
+      msg.includes('quota limit exceeded') ||
+      msg.includes('using maximum backoff delay') ||
+      msg.includes('prevent overloading the backend') ||
+      msg.includes('quota')
+    ) {
+      // Silently drop
+      return;
+    }
+  } catch(e) {}
+  originalConsoleError.apply(console, args);
+};
+
+const originalConsoleWarn = console.warn;
+console.warn = function (...args) {
+  try {
+    const msg = args.map(a => (typeof a === 'object' && a !== null ? (a.message || String(a)) : String(a))).join(' ').toLowerCase();
+    if (
+      msg.includes('using maximum backoff delay') ||
+      msg.includes('prevent overloading the backend') ||
+      msg.includes('quota')
+    ) {
+      return;
+    }
+  } catch(e) {}
+  originalConsoleWarn.apply(console, args);
+};
 
 class ErrorBoundary extends Component<{children: ReactNode}, {hasError: boolean, error: Error | null}> {
   constructor(props: {children: ReactNode}) {

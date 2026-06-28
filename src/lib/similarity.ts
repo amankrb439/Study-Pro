@@ -5,32 +5,44 @@
  */
 export function generateChapterId(subjectId: string, chapterTitle: string): string {
   let cleanTitle = chapterTitle.toLowerCase()
-    .replace(/^(chapter|ch|unit)\s*\d+[\s\.\-\)]*/, "") // Remove "Chapter 1 - ", "Unit 2. "
-    .replace(/^\d+[\s\.\-\)]+/, "") // Remove "1. ", "12) "
     .replace(/[^a-z0-9\u0900-\u097f]+/g, "-") // Allow English alphanumeric and Devanagari
     .replace(/^-+|-+$/g, "");
   if (!cleanTitle) {
-    cleanTitle = "chapter";
+    cleanTitle = "chapter-" + Math.random().toString(36).substring(2, 7);
   }
   return `ch-${subjectId}-${cleanTitle}`;
 }
 
 export function areChaptersSimilar(t1: string, t2: string): boolean {
+  if (!t1 || !t2) return false;
+  
   const clean = (text: string) => {
-    // Remove numbers and periods/spaces/dashes at the start (e.g., "1. ", "12. ", "1 - ")
-    return text.replace(/^\d+[\s\.\-\)]+/, "").toLowerCase().trim();
+    return text.toLowerCase().trim();
   };
 
   const clean1 = clean(t1);
   const clean2 = clean(t2);
 
   if (clean1 === clean2) return true;
-  if (!clean1 || !clean2) return false;
+  
+  // Stricter overlap: require numbers to match if present
+  const extractNumbers = (text: string) => {
+    const matches = text.match(/\d+/g) || [];
+    return matches.join("");
+  };
+  
+  const num1 = extractNumbers(clean1);
+  const num2 = extractNumbers(clean2);
+  
+  // If one has numbers and the other does, and they don't match, they are different chapters (e.g. Chapter 1 vs Chapter 2)
+  if (num1 && num2 && num1 !== num2) {
+    return false;
+  }
 
-  // Extract English words
+  // Extract English words (length >= 3 to avoid 'a', 'to', etc unless it's numbers)
   const getEnglishWords = (text: string) => {
-    const matches = text.match(/[a-zA-Z]+/g) || [];
-    return matches.map(w => w.toLowerCase()).filter(w => w.length > 2);
+    const matches = text.match(/[a-zA-Z0-9]+/g) || [];
+    return matches.map(w => w.toLowerCase()).filter(w => w.length > 2 || /\d/.test(w));
   };
 
   // Extract Hindi words

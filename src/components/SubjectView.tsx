@@ -516,7 +516,7 @@ export function SubjectView() {
       if (chapter.id.includes("ch-1")) return "Physics";
       if (chapter.id.includes("ch-2")) return "Chemistry";
       if (chapter.id.includes("ch-3")) return "Biology";
-      return "Physics";
+      return "General";
     }
     
     return "General";

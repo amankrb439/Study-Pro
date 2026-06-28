@@ -12,6 +12,8 @@ import {
   disableNetwork
 } from "firebase/firestore";
 
+import localforage from "localforage";
+
 export enum OperationType {
   CREATE = 'create',
   UPDATE = 'update',
@@ -76,20 +78,28 @@ export const DEFAULT_SUBJECTS: Omit<Subject, 'id' | 'createdAt'>[] = [
 
 let dbCache: Record<string, any> = {};
 
-function _readFromLocal<T>(key: string, defaultValue: T): T {
+async function _readFromLocal<T>(key: string, defaultValue: T): Promise<T> {
   try {
-    const localVal = localStorage.getItem(key);
+    let localVal = await localforage.getItem<T>(key);
+    
+    // Migration from localStorage
+    if (localVal === null) {
+      const lsVal = localStorage.getItem(key);
+      if (lsVal !== null) {
+        try {
+          localVal = JSON.parse(lsVal);
+          await localforage.setItem(key, localVal);
+          localStorage.removeItem(key);
+        } catch(e) {}
+      }
+    }
+    
     if (localVal !== null) {
-      const parsed = JSON.parse(localVal);
-      dbCache[key] = parsed;
-      return parsed;
+      dbCache[key] = localVal;
+      return localVal;
     }
   } catch (e) {
-    console.error(`Failed to read fallback ${key} from localStorage:`, e);
-    try {
-      localStorage.removeItem(key);
-      console.log(`[Self-Healing] Removed corrupted localStorage key: ${key}`);
-    } catch (clearErr) {}
+    console.error(`Failed to read fallback ${key} from localforage:`, e);
   }
   return defaultValue;
 }
@@ -109,7 +119,7 @@ export async function getLocalItem<T>(key: string, defaultValue: T): Promise<T> 
   }
 
   if (firestoreQuotaExceeded) {
-    return _readFromLocal(key, defaultValue);
+    return await _readFromLocal(key, defaultValue);
   }
 
   // 1. Try to read from Firestore (with a 3-second timeout so we don't hang if offline/poor connection)
@@ -171,10 +181,32 @@ export async function getLocalItem<T>(key: string, defaultValue: T): Promise<T> 
     }
 
     if (found) {
+      if (Array.isArray(firestoreValue)) {
+        const localArray = await _readFromLocal<any[]>(key, []);
+        const map = new Map<string, any>();
+        
+        // Put local items in first
+        localArray.forEach(item => {
+          if (item && item.id) {
+            map.set(item.id, item);
+          }
+        });
+        
+        // Override with Firestore items (cloud is source of truth for items that exist in both)
+        firestoreValue.forEach(item => {
+          if (item && item.id) {
+            map.set(item.id, item);
+          }
+        });
+        
+        // Convert map back to array
+        firestoreValue = Array.from(map.values());
+      }
+
       dbCache[key] = firestoreValue;
-      // Sync to localStorage as a local backup
+      // Sync to localforage as a local backup
       try {
-        localStorage.setItem(key, JSON.stringify(firestoreValue));
+        await localforage.setItem(key, firestoreValue);
       } catch (err) {}
       return firestoreValue as T;
     }
@@ -189,7 +221,7 @@ export async function getLocalItem<T>(key: string, defaultValue: T): Promise<T> 
   }
 
   // 2. Fall back to local storage replica
-  return _readFromLocal(key, defaultValue);
+  return await _readFromLocal(key, defaultValue);
 }
 
 let firestoreQuotaExceeded = false;
@@ -217,11 +249,11 @@ function handleQuotaExceeded() {
 export async function setLocalItem<T>(key: string, value: T) {
   dbCache[key] = value;
   
-  // 1. Always store a backup in localStorage immediately for maximum offline resilience
+  // 1. Always store a backup in localforage immediately for maximum offline resilience
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    await localforage.setItem(key, value);
   } catch (e) {
-    console.warn(`Could not save backup copy of ${key} to localStorage:`, e);
+    console.warn(`Could not save backup copy of ${key} to localforage:`, e);
   }
 
   if (firestoreQuotaExceeded) {
@@ -248,8 +280,7 @@ export async function setLocalItem<T>(key: string, value: T) {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const isExpectedNetworkIssue = msg.toLowerCase().includes("quota") || 
-                                   msg.toLowerCase().includes("resource-exhausted") || 
-                                   msg.toLowerCase().includes("timeout");
+                                   msg.toLowerCase().includes("resource-exhausted");
     
     if (isExpectedNetworkIssue) {
       console.warn(`Firestore offline fallback triggered for ${key}:`, msg);
@@ -313,9 +344,9 @@ export async function saveQuestions(newQuestions: Question[]) {
   // 1. Update local storage and cache immediately
   dbCache["examship_questions"] = updated;
   try {
-    localStorage.setItem("examship_questions", JSON.stringify(updated));
+    await localforage.setItem("examship_questions", updated);
   } catch (e) {
-    console.warn("Could not save backup copy of questions to localStorage:", e);
+    console.warn("Could not save backup copy of questions to localforage:", e);
   }
 
   if (firestoreQuotaExceeded) return;
@@ -335,7 +366,7 @@ export async function saveQuestions(newQuestions: Question[]) {
   } catch (e) {
     console.error("Firestore write failed for new questions:", e);
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("resource-exhausted") || msg.toLowerCase().includes("timeout")) {
+    if (msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("resource-exhausted")) {
       handleQuotaExceeded();
     }
   }
@@ -343,22 +374,48 @@ export async function saveQuestions(newQuestions: Question[]) {
 
 export async function clearAllQuestionsAndSets() {
   dbCache["examship_questions"] = [];
-  try { localStorage.setItem("examship_questions", JSON.stringify([])); } catch(e) {}
+  try { await localforage.setItem("examship_questions", []); } catch(e) {}
   dbCache["examship_quiz_sets"] = [];
-  try { localStorage.setItem("examship_quiz_sets", JSON.stringify([])); } catch(e) {}
+  try { await localforage.setItem("examship_quiz_sets", []); } catch(e) {}
 
   if (firestoreQuotaExceeded) return;
 
   try {
     const qDocs = await getDocs(collection(db, "questions"));
-    const qBatch = writeBatch(db);
-    qDocs.forEach(d => qBatch.delete(d.ref));
-    await withTimeout(qBatch.commit(), 15000);
+    let qBatches = [];
+    let currentQBatch = writeBatch(db);
+    let qCount = 0;
+    
+    qDocs.forEach(d => {
+      currentQBatch.delete(d.ref);
+      qCount++;
+      if (qCount === 500) {
+        qBatches.push(currentQBatch.commit());
+        currentQBatch = writeBatch(db);
+        qCount = 0;
+      }
+    });
+    if (qCount > 0) qBatches.push(currentQBatch.commit());
+    
+    await Promise.all(qBatches.map(p => withTimeout(p, 15000)));
 
     const sDocs = await getDocs(collection(db, "quiz_sets"));
-    const sBatch = writeBatch(db);
-    sDocs.forEach(d => sBatch.delete(d.ref));
-    await withTimeout(sBatch.commit(), 15000);
+    let sBatches = [];
+    let currentSBatch = writeBatch(db);
+    let sCount = 0;
+    
+    sDocs.forEach(d => {
+      currentSBatch.delete(d.ref);
+      sCount++;
+      if (sCount === 500) {
+        sBatches.push(currentSBatch.commit());
+        currentSBatch = writeBatch(db);
+        sCount = 0;
+      }
+    });
+    if (sCount > 0) sBatches.push(currentSBatch.commit());
+    
+    await Promise.all(sBatches.map(p => withTimeout(p, 15000)));
   } catch (e) {
     console.error("Failed to clear cloud collections:", e);
   }
@@ -370,14 +427,14 @@ export async function clearQuestionsAndSetsForChapter(chapterId: string) {
   const filteredQuestions = existingQuestions.filter((q) => q.chapterId !== chapterId);
   
   dbCache["examship_questions"] = filteredQuestions;
-  try { localStorage.setItem("examship_questions", JSON.stringify(filteredQuestions)); } catch (e) {}
+  try { await localforage.setItem("examship_questions", filteredQuestions); } catch (e) {}
 
   const existingSets = await getQuizSets();
   const setsToDelete = existingSets.filter((s) => s.chapterId === chapterId);
   const filteredSets = existingSets.filter((s) => s.chapterId !== chapterId);
   
   dbCache["examship_quiz_sets"] = filteredSets;
-  try { localStorage.setItem("examship_quiz_sets", JSON.stringify(filteredSets)); } catch (e) {}
+  try { await localforage.setItem("examship_quiz_sets", filteredSets); } catch (e) {}
 
   if (firestoreQuotaExceeded) {
     return;
@@ -385,21 +442,40 @@ export async function clearQuestionsAndSetsForChapter(chapterId: string) {
 
   // Permanently delete the specific filtered-out questions and sets from Firestore
   try {
-    const batch = writeBatch(db);
+    let batches = [];
+    let currentBatch = writeBatch(db);
+    let count = 0;
+
     questionsToDelete.forEach((q) => {
       const docRef = doc(db, "questions", q.id);
-      batch.delete(docRef);
+      currentBatch.delete(docRef);
+      count++;
+      if (count === 500) {
+        batches.push(currentBatch.commit());
+        currentBatch = writeBatch(db);
+        count = 0;
+      }
     });
+
     setsToDelete.forEach((s) => {
       const docRef = doc(db, "quiz_sets", s.id);
-      batch.delete(docRef);
+      currentBatch.delete(docRef);
+      count++;
+      if (count === 500) {
+        batches.push(currentBatch.commit());
+        currentBatch = writeBatch(db);
+        count = 0;
+      }
     });
-    await withTimeout(batch.commit(), 15000, "Firestore clear batch commit timeout");
+    
+    if (count > 0) batches.push(currentBatch.commit());
+    await Promise.all(batches.map(p => withTimeout(p, 15000, "Firestore clear batch commit timeout")));
+    
     console.log(`[Firestore] Permanently deleted ${questionsToDelete.length} questions and ${setsToDelete.length} quiz sets for chapter: ${chapterId}`);
   } catch (err: any) {
     console.warn("[Firestore] Failed to batch delete chapter records:", err);
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("resource-exhausted") || msg.toLowerCase().includes("timeout")) {
+    if (msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("resource-exhausted")) {
       handleQuotaExceeded();
     }
   }
@@ -424,7 +500,7 @@ export async function saveQuizSet(set: QuizSet) {
   
   dbCache["examship_quiz_sets"] = existing;
   try {
-    localStorage.setItem("examship_quiz_sets", JSON.stringify(existing));
+    await localforage.setItem("examship_quiz_sets", existing);
   } catch (e) {}
 
   if (firestoreQuotaExceeded) return;
